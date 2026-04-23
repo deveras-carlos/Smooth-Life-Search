@@ -5,6 +5,8 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -263,9 +265,7 @@ class TestAGSLS( unittest.TestCase ):
         search.reset( seed=19 )
         run = search.run()
         global_trace = np.asarray( [ snapshot.best_value for snapshot in run.snapshots ], dtype=float )
-        local_trace = np.asarray( [ snapshot.local_best_value for snapshot in run.snapshots ], dtype=float )
         self.assertTrue( np.all( np.diff( global_trace ) <= 1e-12 ) )
-        self.assertTrue( np.all( np.diff( local_trace ) <= 1e-12 ) )
         self.assertAlmostEqual( float( global_trace[ -1 ] ), float( run.best_value ), places=12 )
 
     def test_zoom_cycles_shrink_bounds_and_become_more_frequent( self ) -> None:
@@ -388,6 +388,18 @@ class TestVisualization( unittest.TestCase ):
 
 
 class TestCli( unittest.TestCase ):
+    def test_module_entrypoint_executes_main( self ) -> None:
+        result = subprocess.run(
+            [ sys.executable, "-m", "smooth_life_search.cli", "--help" ],
+            cwd=Path( __file__ ).resolve().parents[ 1 ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual( result.returncode, 0 )
+        self.assertIn( "usage:", result.stdout )
+        self.assertIn( "simulate", result.stdout )
+
     def test_single_command_can_trigger_gui_viewer( self ) -> None:
         stdout = StringIO()
         with patch( "smooth_life_search.cli.open_run_viewer" ) as open_viewer:

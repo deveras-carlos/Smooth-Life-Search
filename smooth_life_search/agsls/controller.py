@@ -6,6 +6,7 @@ from typing import Callable
 
 import numpy as np
 
+from ..adaptive import AGSLS_PER_DECISION_FIELDS, RuntimeSignals, SchedulePolicy, ZOOM_BOUNDARY_FIELDS
 from ..results import Basin, SearchRun, ZoomEvent
 from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.simulator import SmoothLifeSearch
@@ -25,13 +26,20 @@ class AdaptiveGridSmoothLifeSearch:
         bounds: np.ndarray | list[ tuple[ float, float ] ],
         smoothlife_config: SmoothLifeConfig | None = None,
         agsls_config: AGSLSConfig | None = None,
+        runtime_policy: SchedulePolicy | None = None,
     ) -> None:
         self.objective = objective
         self.original_bounds = self._normalize_bounds( bounds )
         self.smoothlife_config = smoothlife_config or SmoothLifeConfig()
         self.agsls_config = agsls_config or AGSLSConfig()
-        self.engine = SmoothLifeSearch( objective, self.original_bounds, self.smoothlife_config )
+        self.runtime_policy = runtime_policy
+        self.engine = SmoothLifeSearch( objective, self.original_bounds, self.smoothlife_config, runtime_policy=runtime_policy )
         self.zoom_events: list[ ZoomEvent ] = [ ]
+        self.active_max_evaluations: int | None = None
+        self._last_basin_count = 0
+        self._last_top_basin_score_gap = 0.0
+        self._decision_reason_counts: dict[str, int] = { }
+        self._accepted_zoom_count = 0
 
     @staticmethod
     def _normalize_bounds( bounds: np.ndarray | list[ tuple[ float, float ] ] ) -> np.ndarray:
@@ -46,14 +54,67 @@ class AdaptiveGridSmoothLifeSearch:
         """Reset the underlying SmoothLife engine and zoom history."""
 
         self.engine.reset( seed=seed, bounds=self.original_bounds.copy() )
+        self.engine.set_zoom_index( 0, max_zoom_cycles=self.agsls_config.max_zoom_cycles )
         self.zoom_events = [ ]
+        self._last_basin_count = 0
+        self._last_top_basin_score_gap = 0.0
+        self._decision_reason_counts = { }
+        self._accepted_zoom_count = 0
 
     def _max_evaluations_reached( self ) -> bool:
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
-        limit = self.agsls_config.max_evaluations
+        limit = self.active_max_evaluations if self.active_max_evaluations is not None else self.agsls_config.max_evaluations
         return limit is not None and state.evaluations >= limit
+
+    def runtime_signals( self ) -> RuntimeSignals:
+        base = self.engine.runtime_signals()
+        return RuntimeSignals(
+            step_index=base.step_index,
+            zoom_index=base.zoom_index,
+            evaluations=base.evaluations,
+            remaining_budget=base.remaining_budget,
+            total_budget=base.total_budget,
+            explored_fraction=base.explored_fraction,
+            current_box_widths=base.current_box_widths,
+            best_value=base.best_value,
+            local_best_value=base.local_best_value,
+            global_improvement=base.global_improvement,
+            stage_improvement=base.stage_improvement,
+            basin_count=self._last_basin_count,
+            top_basin_score_gap=self._last_top_basin_score_gap,
+            max_zoom_cycles=base.max_zoom_cycles,
+        )
+
+    def apply_runtime_overrides( self, overrides: dict[ str, float | int ] ) -> dict[ str, float | int ]:
+        changed: dict[ str, float | int ] = { }
+        if not overrides:
+            return changed
+        for field_name, value in overrides.items():
+            if not hasattr( self.agsls_config, field_name ):
+                continue
+            current = getattr( self.agsls_config, field_name )
+            if current == value:
+                continue
+            setattr( self.agsls_config, field_name, value )
+            changed[ field_name ] = value
+        if changed:
+            self.agsls_config.__post_init__()
+        return changed
+
+    def apply_runtime_policy( self, allowed_fields: set[ str ] | frozenset[ str ] ) -> dict[ str, float | int ]:
+        if self.runtime_policy is None:
+            return { }
+        overrides = self.runtime_policy.resolve( self.runtime_signals(), allowed_fields )
+        return self.apply_runtime_overrides( overrides )
+
+    def _update_basin_runtime_state( self, basins: list[ Basin ] ) -> None:
+        self._last_basin_count = len( basins )
+        if len( basins ) >= 2:
+            self._last_top_basin_score_gap = float( basins[ 0 ].combined_score - basins[ 1 ].combined_score )
+        else:
+            self._last_top_basin_score_gap = 0.0
 
     def _persistence_map( self, steps: int ) -> np.ndarray:
         height, width = self.engine.config.grid_shape
@@ -106,6 +167,11 @@ class AdaptiveGridSmoothLifeSearch:
         snapshot.metadata[ "zoom_decision" ] = decision
         if basins is not None:
             snapshot.metadata[ "dense_groups" ] = self._basin_metadata( basins )
+
+    def _record_decision_reason( self, reason: str, *, accepted: bool = False ) -> None:
+        self._decision_reason_counts[ reason ] = int( self._decision_reason_counts.get( reason, 0 ) ) + 1
+        if accepted:
+            self._accepted_zoom_count += 1
 
     def _probe_score_field( self ) -> np.ndarray:
         state = self.engine.state
@@ -218,14 +284,21 @@ class AdaptiveGridSmoothLifeSearch:
         """Run one AGSLS decision round. Returns True when a zoom is accepted."""
 
         zoom_index = len( self.zoom_events )
+        self.engine.set_zoom_index( zoom_index, max_zoom_cycles=self.agsls_config.max_zoom_cycles )
+        self.apply_runtime_policy( AGSLS_PER_DECISION_FIELDS )
+        self.apply_runtime_policy( ZOOM_BOUNDARY_FIELDS )
+        self.engine.apply_runtime_policy( ZOOM_BOUNDARY_FIELDS, rebuild_kernels=True )
         steps = steps_for_zoom_cycle( self.agsls_config, zoom_index )
         persistence = self._persistence_map( steps )
         ranked = self._rank_basins( persistence )
+        self._update_basin_runtime_state( ranked )
         self._probe_basins( ranked )
         ranked = self._rank_basins( persistence )
+        self._update_basin_runtime_state( ranked )
         eligible = self._eligible_basins( ranked )
         if not eligible:
             self._mark_latest_snapshot( decision="deferred_no_eligible_group", basins=ranked )
+            self._record_decision_reason( "deferred_no_eligible_group" )
             return False
 
         explored_in_stage = 0
@@ -249,6 +322,7 @@ class AdaptiveGridSmoothLifeSearch:
             eligible = self._eligible_basins( ranked )
             if not eligible:
                 self._mark_latest_snapshot( decision="deferred_groups_lost", basins=ranked )
+                self._record_decision_reason( "deferred_groups_lost" )
                 return False
             decision_ready, decision_reason = self._should_choose_leader( eligible, explored_in_stage )
             if gained == 0:
@@ -263,9 +337,11 @@ class AdaptiveGridSmoothLifeSearch:
         old_bounds = state.bounds.copy()
         if np.allclose( new_bounds, old_bounds ):
             self._mark_latest_snapshot( decision="deferred_no_shrink", basins=eligible )
+            self._record_decision_reason( "deferred_no_shrink" )
             return False
         self.engine.remap_to_bounds( new_bounds )
         self._record_zoom( selected, old_bounds, new_bounds, steps, decision_reason )
+        self._record_decision_reason( decision_reason, accepted=True )
         return True
 
     def run( self, zoom_cycles: int | None = None, evaluations: int | None = None ) -> SearchRun:
@@ -273,24 +349,29 @@ class AdaptiveGridSmoothLifeSearch:
 
         limit = self.agsls_config.max_zoom_cycles if zoom_cycles is None else int( zoom_cycles )
         eval_limit = self.agsls_config.max_evaluations if evaluations is None else int( evaluations )
-        if eval_limit is not None:
-            self.agsls_config.max_evaluations = eval_limit
+        self.active_max_evaluations = eval_limit
+        self.engine.active_max_evaluations = eval_limit
+        self.engine.set_zoom_index( len( self.zoom_events ), max_zoom_cycles=limit )
         decision_rounds = 0
         max_rounds = max( limit * 4, limit )
-        while len( self.zoom_events ) < limit:
-            state = self.engine.state
-            if state is None:
-                raise RuntimeError( "engine state missing" )
-            if eval_limit is not None and state.evaluations >= eval_limit:
-                break
-            widths = state.bounds[ :, 1 ] - state.bounds[ :, 0 ]
-            min_widths = self.agsls_config.min_side_fraction * ( self.original_bounds[ :, 1 ] - self.original_bounds[ :, 0 ] )
-            if np.all( widths <= min_widths ):
-                break
-            self.step()
-            decision_rounds += 1
-            if eval_limit is None and decision_rounds >= max_rounds:
-                break
+        try:
+            while len( self.zoom_events ) < limit:
+                state = self.engine.state
+                if state is None:
+                    raise RuntimeError( "engine state missing" )
+                if eval_limit is not None and state.evaluations >= eval_limit:
+                    break
+                widths = state.bounds[ :, 1 ] - state.bounds[ :, 0 ]
+                min_widths = self.agsls_config.min_side_fraction * ( self.original_bounds[ :, 1 ] - self.original_bounds[ :, 0 ] )
+                if np.all( widths <= min_widths ):
+                    break
+                self.step()
+                decision_rounds += 1
+                if eval_limit is None and decision_rounds >= max_rounds:
+                    break
+        finally:
+            self.active_max_evaluations = None
+            self.engine.active_max_evaluations = None
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
@@ -304,6 +385,9 @@ class AdaptiveGridSmoothLifeSearch:
             metadata={
                 "mode": "agsls",
                 "zoom_cycles": len( self.zoom_events ),
+                "schedule_summary": None if self.runtime_policy is None else self.runtime_policy.summary(),
+                "decision_reason_counts": dict( sorted( self._decision_reason_counts.items() ) ),
+                "zoom_acceptance_count": int( self._accepted_zoom_count ),
             },
         )
 

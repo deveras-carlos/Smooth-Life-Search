@@ -44,7 +44,13 @@ def run_seeded_trials(
     return results
 
 
-def summarize_results(results: list[SearchResult], success_threshold: float) -> BenchmarkSummary:
+def _success_mask(best_values: np.ndarray, success_threshold: float, maximize: bool) -> np.ndarray:
+    if maximize:
+        return np.asarray(best_values, dtype=float) >= float(success_threshold)
+    return np.asarray(best_values, dtype=float) <= float(success_threshold)
+
+
+def summarize_results(results: list[SearchResult], success_threshold: float, maximize: bool = False) -> BenchmarkSummary:
     """Aggregate the per-seed results with median, IQR, and success rate."""
 
     if not results:
@@ -52,7 +58,7 @@ def summarize_results(results: list[SearchResult], success_threshold: float) -> 
     best_values = np.asarray([result.best_value for result in results], dtype=float)
     seeds = np.asarray([int(result.metadata.get("seed", -1)) for result in results], dtype=int)
     q1, q3 = np.quantile(best_values, [0.25, 0.75])
-    success_rate = float(np.mean(best_values <= success_threshold))
+    success_rate = float(np.mean(_success_mask(best_values, success_threshold, maximize=maximize)))
     return BenchmarkSummary(
         seeds=seeds,
         best_values=best_values,

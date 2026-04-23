@@ -1,22 +1,32 @@
 """SmoothLife Search and Adaptive Grid Smooth Life Search for 2D optimization."""
 
+from .adaptive import FieldSchedule, RuntimeSignals, SchedulePolicy
 from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
 from .benchmarking import BenchmarkSummary, run_seeded_trials, summarize_results
 from .benchmarks import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
+from .objectives import DEFAULT_BOUNDS, OBJECTIVES
 from .results import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
 from .smoothlife import SmoothLifeConfig, SmoothLifeSearch
+from .tuning import StudySpec, StudySummary, run_tuning_study
 from .visualization import open_run_viewer, render_run_frames, save_run_animation, snapshot_to_image
 
 __all__ = [
+    "DEFAULT_BOUNDS",
+    "FieldSchedule",
+    "OBJECTIVES",
     "AGSLSConfig",
     "AdaptiveGridSmoothLifeSearch",
     "Basin",
     "BenchmarkSummary",
+    "RuntimeSignals",
     "SearchResult",
+    "SchedulePolicy",
     "SearchRun",
     "SmoothLifeConfig",
     "SmoothLifeSearch",
     "SmoothLifeSnapshot",
+    "StudySpec",
+    "StudySummary",
     "ZoomEvent",
     "ackley",
     "griewank",
@@ -26,6 +36,7 @@ __all__ = [
     "render_run_frames",
     "rosenbrock",
     "run_seeded_trials",
+    "run_tuning_study",
     "save_run_animation",
     "snapshot_to_image",
     "sphere",

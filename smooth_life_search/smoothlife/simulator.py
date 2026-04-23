@@ -6,6 +6,7 @@ from typing import Callable
 
 import numpy as np
 
+from ..adaptive import KERNEL_PARAMETER_FIELDS, RuntimeSignals, SMOOTHLIFE_PER_STEP_FIELDS, SchedulePolicy, ZOOM_BOUNDARY_FIELDS
 from ..results import Basin, SearchRun, SmoothLifeSnapshot
 from .basins import detect_basins
 from .config import SmoothLifeConfig
@@ -21,15 +22,29 @@ Objective = Callable[[ np.ndarray ], float]
 class SmoothLifeSearch:
     """Literal SmoothLife-inspired 2D simulator coupled to an optimization objective."""
 
-    def __init__( self, objective: Objective, bounds: np.ndarray | list[ tuple[ float, float ] ], config: SmoothLifeConfig | None = None ) -> None:
+    def __init__(
+        self,
+        objective: Objective,
+        bounds: np.ndarray | list[ tuple[ float, float ] ],
+        config: SmoothLifeConfig | None = None,
+        runtime_policy: SchedulePolicy | None = None,
+    ) -> None:
         self.objective = objective
         self.original_bounds = self._normalize_bounds( bounds )
         self.config = apply_preset( config or SmoothLifeConfig() )
+        self.runtime_policy = runtime_policy
         self.rng = np.random.default_rng()
         self.inner_kernel = build_disk_kernel( self.config.inner_radius, self.config.anti_alias_radius )
         self.outer_kernel = build_ring_kernel( self.config.inner_radius, self.config.outer_radius, self.config.anti_alias_radius )
         self.state: SmoothLifeState | None = None
         self.snapshots: list[ SmoothLifeSnapshot ] = [ ]
+        self.current_zoom_index = 0
+        self.active_max_evaluations: int | None = None
+        self.max_zoom_cycles = 1
+        self._observed_best_value: float | None = None
+        self._observed_local_best_value: float | None = None
+        self._last_global_improvement = 0.0
+        self._last_stage_improvement = 0.0
         self.reset()
 
     @staticmethod
@@ -81,11 +96,22 @@ class SmoothLifeSearch:
     def _default_point( self, bounds: np.ndarray ) -> np.ndarray:
         return np.mean( bounds, axis=1 )
 
+    def _rebuild_kernels( self ) -> None:
+        self.inner_kernel = build_disk_kernel( self.config.inner_radius, self.config.anti_alias_radius )
+        self.outer_kernel = build_ring_kernel( self.config.inner_radius, self.config.outer_radius, self.config.anti_alias_radius )
+
+    def set_zoom_index( self, zoom_index: int, max_zoom_cycles: int | None = None ) -> None:
+        self.current_zoom_index = max( int( zoom_index ), 0 )
+        if max_zoom_cycles is not None:
+            self.max_zoom_cycles = max( int( max_zoom_cycles ), 1 )
+
     def reset( self, seed: int | None = None, bounds: np.ndarray | None = None ) -> None:
         """Reset the field and the lazy objective cache."""
 
         if seed is not None:
             self.rng = np.random.default_rng( seed )
+        if self.runtime_policy is not None:
+            self.runtime_policy.reset_tracking()
         current_bounds = self.original_bounds.copy() if bounds is None else self._normalize_bounds( bounds )
         field = self._initial_field()
         objective_values, objective_field, evaluated_mask = self._blank_objective_cache()
@@ -114,11 +140,35 @@ class SmoothLifeSearch:
         self._bootstrap_exploration()
         self._refresh_dynamics_fields()
         self.snapshots = [ self.snapshot() ]
+        self._reset_improvement_trackers()
 
     def _require_state( self ) -> SmoothLifeState:
         if self.state is None:
             raise RuntimeError( "simulator has not been initialized" )
         return self.state
+
+    def _improvement_amount( self, previous: float | None, current: float ) -> float:
+        if previous is None or not np.isfinite( previous ) or not np.isfinite( current ):
+            return 0.0
+        if self.config.maximize:
+            return max( 0.0, float( current ) - float( previous ) )
+        return max( 0.0, float( previous ) - float( current ) )
+
+    def _reset_improvement_trackers( self ) -> None:
+        state = self._require_state()
+        self._observed_best_value = float( state.best_value )
+        self._observed_local_best_value = float( state.local_best_value )
+        self._last_global_improvement = 0.0
+        self._last_stage_improvement = 0.0
+
+    def _update_improvement_trackers( self ) -> None:
+        state = self._require_state()
+        current_best = float( state.best_value )
+        current_local = float( state.local_best_value )
+        self._last_global_improvement = self._improvement_amount( self._observed_best_value, current_best )
+        self._last_stage_improvement = self._improvement_amount( self._observed_local_best_value, current_local )
+        self._observed_best_value = current_best
+        self._observed_local_best_value = current_local
 
     def _pixel_center( self, row: int, col: int, bounds: np.ndarray ) -> np.ndarray:
         height, width = self.config.grid_shape
@@ -162,6 +212,54 @@ class SmoothLifeSearch:
 
     def best_value( self ) -> float:
         return float( self._require_state().best_value )
+
+    def runtime_signals( self ) -> RuntimeSignals:
+        state = self._require_state()
+        widths = state.bounds[ :, 1 ] - state.bounds[ :, 0 ]
+        remaining_budget = None
+        if self.active_max_evaluations is not None:
+            remaining_budget = max( int( self.active_max_evaluations ) - int( state.evaluations ), 0 )
+        return RuntimeSignals(
+            step_index=int( state.step_index ),
+            zoom_index=int( self.current_zoom_index ),
+            evaluations=int( state.evaluations ),
+            remaining_budget=remaining_budget,
+            total_budget=self.active_max_evaluations,
+            explored_fraction=float( np.mean( state.evaluated_mask ) ),
+            current_box_widths=( float( widths[ 0 ] ), float( widths[ 1 ] ) ),
+            best_value=float( state.best_value ),
+            local_best_value=float( state.local_best_value ),
+            global_improvement=float( self._last_global_improvement ),
+            stage_improvement=float( self._last_stage_improvement ),
+            max_zoom_cycles=int( self.max_zoom_cycles ),
+        )
+
+    def apply_runtime_overrides( self, overrides: dict[ str, float | int ], *, rebuild_kernels: bool ) -> dict[ str, float | int ]:
+        changed: dict[ str, float | int ] = { }
+        if not overrides:
+            return changed
+        for field_name, value in overrides.items():
+            if not hasattr( self.config, field_name ):
+                continue
+            current = getattr( self.config, field_name )
+            if current == value:
+                continue
+            setattr( self.config, field_name, value )
+            changed[ field_name ] = value
+        if not changed:
+            return changed
+        self.config.__post_init__()
+        if rebuild_kernels and any( field_name in KERNEL_PARAMETER_FIELDS for field_name in changed ):
+            self._rebuild_kernels()
+        if self.state is not None:
+            self._refresh_dynamics_fields()
+        return changed
+
+    def apply_runtime_policy( self, allowed_fields: set[ str ] | frozenset[ str ], *, rebuild_kernels: bool ) -> dict[ str, float | int ]:
+        if self.runtime_policy is None:
+            return { }
+        overrides = self.runtime_policy.resolve( self.runtime_signals(), allowed_fields )
+        return self.apply_runtime_overrides( overrides, rebuild_kernels=rebuild_kernels )
 
     def _refresh_dynamics_fields( self ) -> None:
         state = self._require_state()
@@ -248,6 +346,7 @@ class SmoothLifeSearch:
         self._refresh_objective_field()
         self._update_best_records()
         self._refresh_dynamics_fields()
+        self._update_improvement_trackers()
         return int( values.size )
 
     def _top_unexplored_indices(
@@ -319,6 +418,7 @@ class SmoothLifeSearch:
 
         state = self._require_state()
         for _ in range( n ):
+            self.apply_runtime_policy( SMOOTHLIFE_PER_STEP_FIELDS, rebuild_kernels=False )
             laplacian = self._laplacian( state.field )
             target_state = state.transition_field
             if self.config.time_mode == "continuous":
@@ -394,11 +494,14 @@ class SmoothLifeSearch:
         state.objective_field = objective_field
         state.evaluated_mask = evaluated_mask
         default_point = self._default_point( new_bounds )
+        state.local_best_point = default_point.copy()
+        state.local_best_value = self._worst_value()
         state.box_best_point = default_point.copy()
         state.box_best_value = self._worst_value()
         self._refresh_dynamics_fields()
         self._bootstrap_exploration()
         self._refresh_dynamics_fields()
+        self._reset_improvement_trackers()
         self._capture_snapshot( force=True )
 
     def run( self, steps: int | None = None, evaluations: int | None = None ) -> SearchRun:
@@ -408,15 +511,21 @@ class SmoothLifeSearch:
             steps = self.config.snapshot_interval
         state = self._require_state()
         target_evaluations = None if evaluations is None else int( evaluations )
+        self.active_max_evaluations = target_evaluations
+        self.apply_runtime_policy( ZOOM_BOUNDARY_FIELDS, rebuild_kernels=True )
         remaining_steps = 0 if steps is None else int( steps )
-        while True:
-            if remaining_steps <= 0 and steps is not None:
-                break
-            if target_evaluations is not None and state.evaluations >= target_evaluations:
-                break
-            self.step( 1 )
-            if steps is not None:
-                remaining_steps -= 1
+        try:
+            while True:
+                if remaining_steps <= 0 and steps is not None:
+                    break
+                if target_evaluations is not None and state.evaluations >= target_evaluations:
+                    break
+                self.step( 1 )
+                if steps is not None:
+                    remaining_steps -= 1
+        finally:
+            self.active_max_evaluations = None
+        schedule_summary = None if self.runtime_policy is None else self.runtime_policy.summary()
         return SearchRun(
             best_point=state.best_point.copy(),
             best_value=float( state.best_value ),
@@ -427,5 +536,6 @@ class SmoothLifeSearch:
             metadata={
                 "mode": self.config.run_mode,
                 "steps": int( state.step_index ),
+                "schedule_summary": schedule_summary,
             },
         )
