@@ -24,6 +24,15 @@ class Basin:
     basin_best_point: np.ndarray | None = None
     basin_best_value: float | None = None
     combined_score: float = 0.0
+    core_mask: np.ndarray | None = None
+    core_bbox_grid: tuple[int, int, int, int] | None = None
+    core_bbox_world: np.ndarray | None = None
+    evaluated_count: int = 0
+    best_objective_score: float = 0.0
+    mean_objective_score: float = 0.0
+    unexplored_fraction: float = 1.0
+    incumbent_in_envelope: bool = False
+    better_than_incumbent: bool = False
 
     @property
     def area(self) -> int:
@@ -67,6 +76,7 @@ class ZoomEvent:
     selected_basin_bbox: np.ndarray
     evaluation_count: int
     steps_per_zoom: int
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

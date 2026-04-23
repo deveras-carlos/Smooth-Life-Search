@@ -31,7 +31,7 @@ class SmoothLifeConfig:
     field_ceiling: float = 1.0
     initial_field_center: float = 0.0
     initial_field_noise: float = 0.10
-    evaluations_per_step: int = 8
+    evaluations_per_step: int = 16
     snapshot_interval: int = 2
     time_mode: TimeMode = "discrete"
     run_mode: RunMode = "search"

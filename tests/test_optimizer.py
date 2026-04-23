@@ -228,6 +228,52 @@ class TestDenseGroups( unittest.TestCase ):
         )
         self.assertEqual( len( merged ), 1 )
 
+    def test_core_envelope_bounds_preserve_nearby_incumbent( self ) -> None:
+        bounds = np.asarray( [ [ 0.0, 16.0 ], [ 0.0, 16.0 ] ], dtype=float )
+        support = np.zeros( ( 16, 16 ), dtype=float )
+        support[ 4:12, 4:12 ] = 0.6
+        support[ 5:11, 5:11 ] = 1.0
+        objective = np.full_like( support, 0.5 )
+        alive = support > 0.0
+        evaluated = np.zeros_like( support, dtype=bool )
+        evaluated[ 8, 4 ] = True
+        evaluated[ 8, 8 ] = True
+        objective[ 8, 4 ] = 1.0
+        objective[ 8, 8 ] = 0.7
+        values = np.full_like( support, np.inf )
+        values[ 8, 4 ] = 0.0
+        values[ 8, 8 ] = 1.0
+        incumbent = np.asarray( [ 4.5, 8.5 ], dtype=float )
+
+        basins = detect_basins(
+            support_field=support,
+            objective_field=objective,
+            bounds=bounds,
+            alive_mask=alive,
+            evaluated_mask=evaluated,
+            objective_values=values,
+            maximize=False,
+            threshold_quantile=0.88,
+            min_cells=8,
+            cluster_eps_pixels=2.5,
+            cluster_min_samples=3,
+            basin_envelope_quantile_offset=0.08,
+            basin_envelope_growth_pixels=0,
+            global_best_point=incumbent,
+            global_best_value=0.0,
+        )
+
+        self.assertEqual( len( basins ), 1 )
+        basin = basins[ 0 ]
+        self.assertIsNotNone( basin.core_bbox_world )
+        core_contains_incumbent = bool( np.all( ( incumbent >= basin.core_bbox_world[ :, 0 ] ) & ( incumbent <= basin.core_bbox_world[ :, 1 ] ) ) )
+        envelope_contains_incumbent = bool( np.all( ( incumbent >= basin.bbox_world[ :, 0 ] ) & ( incumbent <= basin.bbox_world[ :, 1 ] ) ) )
+        self.assertFalse( core_contains_incumbent )
+        self.assertTrue( envelope_contains_incumbent )
+        self.assertTrue( basin.incumbent_in_envelope )
+        self.assertEqual( basin.evaluated_count, 2 )
+        self.assertAlmostEqual( basin.best_objective_score, 1.0 )
+
     def test_alive_density_changes_group_ranking( self ) -> None:
         bounds = np.asarray( [ [ -10.0, 10.0 ], [ -10.0, 10.0 ] ], dtype=float )
         high_density = _make_basin( ( 16, 16 ), bounds, 2, 2, 6, 6, score=0.0, alive_density=0.9, best_value=1.0 )
@@ -267,6 +313,219 @@ class TestAGSLS( unittest.TestCase ):
         global_trace = np.asarray( [ snapshot.best_value for snapshot in run.snapshots ], dtype=float )
         self.assertTrue( np.all( np.diff( global_trace ) <= 1e-12 ) )
         self.assertAlmostEqual( float( global_trace[ -1 ] ), float( run.best_value ), places=12 )
+
+    @staticmethod
+    def _late_stage_signals(
+        *,
+        zoom_index: int = 0,
+        max_zoom_cycles: int = 5,
+        global_improvement: float = 1.0,
+        stage_improvement: float = 1.0,
+    ):
+        from smooth_life_search.adaptive import RuntimeSignals
+
+        return RuntimeSignals(
+            step_index=0,
+            zoom_index=zoom_index,
+            evaluations=0,
+            remaining_budget=100,
+            total_budget=100,
+            explored_fraction=0.0,
+            current_box_widths=(1.0, 1.0),
+            best_value=1.0,
+            local_best_value=1.0,
+            global_improvement=global_improvement,
+            stage_improvement=stage_improvement,
+            max_zoom_cycles=max_zoom_cycles,
+        )
+
+    def test_late_stage_reactive_default_returns_base( self ) -> None:
+        from smooth_life_search import FieldSchedule
+
+        schedule = FieldSchedule(
+            field_name="evaluations_per_step",
+            mode="late_stage_reactive",
+            base_value=16,
+            high_value=8,
+            zoom_fraction_threshold=0.6,
+            plateau_threshold=1e-4,
+        )
+        signals = self._late_stage_signals( zoom_index=1, max_zoom_cycles=5, global_improvement=1.0 )
+        self.assertEqual( schedule.evaluate( signals ), 16 )
+
+    def test_late_stage_reactive_fires_on_zoom_fraction( self ) -> None:
+        from smooth_life_search import FieldSchedule
+
+        schedule = FieldSchedule(
+            field_name="evaluations_per_step",
+            mode="late_stage_reactive",
+            base_value=16,
+            high_value=8,
+            zoom_fraction_threshold=0.6,
+            plateau_threshold=1e-4,
+        )
+        signals = self._late_stage_signals( zoom_index=3, max_zoom_cycles=5, global_improvement=1.0 )
+        self.assertEqual( schedule.evaluate( signals ), 8 )
+
+    def test_late_stage_reactive_fires_on_plateau( self ) -> None:
+        from smooth_life_search import FieldSchedule
+
+        schedule = FieldSchedule(
+            field_name="evaluations_per_step",
+            mode="late_stage_reactive",
+            base_value=16,
+            high_value=8,
+            zoom_fraction_threshold=0.6,
+            plateau_threshold=1e-4,
+        )
+        signals = self._late_stage_signals(
+            zoom_index=0, max_zoom_cycles=5, global_improvement=1e-7, stage_improvement=1e-7
+        )
+        self.assertEqual( schedule.evaluate( signals ), 8 )
+
+    def test_smoothlife_per_step_fields_reresolve_each_decision( self ) -> None:
+        from smooth_life_search import FieldSchedule, SchedulePolicy
+
+        policy = SchedulePolicy(
+            schedules=( FieldSchedule(
+                field_name="evaluations_per_step",
+                mode="late_stage_reactive",
+                base_value=4,
+                high_value=4,
+                zoom_fraction_threshold=0.6,
+                plateau_threshold=1e-4,
+            ), ),
+            family="smoothlife_cadence",
+            schedule_kind="late_stage_reactive",
+        )
+        smoothlife = SmoothLifeConfig( grid_shape=( 32, 32 ), evaluations_per_step=4, preset="search", snapshot_interval=1 )
+        agsls = AGSLSConfig( max_zoom_cycles=2, max_evaluations=200 )
+        search = AdaptiveGridSmoothLifeSearch(
+            sphere,
+            bounds=[ ( -5.0, 5.0 ), ( -5.0, 5.0 ) ],
+            smoothlife_config=smoothlife,
+            agsls_config=agsls,
+            runtime_policy=policy,
+        )
+        search.reset( seed=3 )
+        run = search.run()
+        summary = run.metadata.get( "schedule_summary" )
+        self.assertIsNotNone( summary )
+        field_summaries = summary[ "field_summaries" ]
+        evals_summary = next( entry for entry in field_summaries if entry[ "field_name" ] == "evaluations_per_step" )
+        self.assertGreaterEqual( int( evals_summary[ "resolution_count" ] ), 1 )
+
+    def test_zoom_limit_scales_with_budget( self ) -> None:
+        agsls = AGSLSConfig( max_zoom_cycles=5, zoom_cycles_budget_baseline=800 )
+        search = AdaptiveGridSmoothLifeSearch( sphere, bounds=[ ( -1.0, 1.0 ), ( -1.0, 1.0 ) ], agsls_config=agsls )
+        self.assertEqual( search._effective_zoom_limit( 1600, 5 ), 6 )
+        self.assertEqual( search._effective_zoom_limit( 3200, 5 ), 7 )
+        self.assertEqual( search._effective_zoom_limit( 6400, 5 ), 8 )
+        self.assertEqual( search._effective_zoom_limit( 12800, 5 ), 9 )
+
+    def test_zoom_limit_unchanged_at_small_budget( self ) -> None:
+        agsls = AGSLSConfig( max_zoom_cycles=5, zoom_cycles_budget_baseline=800 )
+        search = AdaptiveGridSmoothLifeSearch( sphere, bounds=[ ( -1.0, 1.0 ), ( -1.0, 1.0 ) ], agsls_config=agsls )
+        self.assertEqual( search._effective_zoom_limit( 400, 5 ), 5 )
+        self.assertEqual( search._effective_zoom_limit( 800, 5 ), 5 )
+        self.assertEqual( search._effective_zoom_limit( None, 5 ), 5 )
+
+    def test_zoom_limit_scaling_disabled_when_baseline_none( self ) -> None:
+        agsls = AGSLSConfig( max_zoom_cycles=5, zoom_cycles_budget_baseline=None )
+        search = AdaptiveGridSmoothLifeSearch( sphere, bounds=[ ( -1.0, 1.0 ), ( -1.0, 1.0 ) ], agsls_config=agsls )
+        self.assertEqual( search._effective_zoom_limit( 6400, 5 ), 5 )
+        self.assertEqual( search._effective_zoom_limit( 12800, 5 ), 5 )
+
+    def test_late_stage_trigger_fires_on_plateau_and_weak_shrink( self ) -> None:
+        smoothlife = SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=6, snapshot_interval=1, preset="search" )
+        agsls = AGSLSConfig( max_zoom_cycles=3, late_stage_max_rounds=2, late_stage_eval_batch=3, max_evaluations=120 )
+        search = AdaptiveGridSmoothLifeSearch( sphere, bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ], smoothlife_config=smoothlife, agsls_config=agsls )
+        search.reset( seed=5 )
+        state = search.engine.state
+        self.assertIsNotNone( state )
+        basin = _make_basin(
+            search.engine.config.grid_shape,
+            state.bounds,
+            4,
+            4,
+            12,
+            12,
+            score=0.85,
+            alive_density=0.7,
+            best_value=float( state.local_best_value ),
+        )
+        basin.incumbent_in_envelope = True
+        weak_bounds = state.bounds.copy()
+        weak_bounds[ 0, 0 ] += 0.25
+        weak_bounds[ 0, 1 ] -= 0.25
+        weak_bounds[ 1, 0 ] += 0.25
+        weak_bounds[ 1, 1 ] -= 0.25
+        late_state = {
+            "late_stage_mode": False,
+            "plateau": False,
+            "small_box": False,
+            "late": False,
+            "intensification_rounds": 0,
+        }
+        should_intensify, projected_shrink_ratio, exit_reason = search._should_intensify(
+            box_id=0,
+            basin=basin,
+            old_bounds=state.bounds.copy(),
+            new_bounds=weak_bounds,
+            late_stage_state=late_state,
+        )
+        self.assertTrue( should_intensify )
+        self.assertEqual( exit_reason, "weak_shrink" )
+        self.assertGreaterEqual( projected_shrink_ratio, agsls.late_stage_min_shrink_ratio )
+
+        search._box_round_counts[ 0 ] = 1
+        search.engine._last_global_improvement = 0.0
+        search.engine._last_stage_improvement = 0.0
+        plateau_state = search._late_stage_state( box_id=0, active_limit=3, bounds=state.bounds.copy() )
+        self.assertTrue( bool( plateau_state[ "plateau" ] ) )
+        should_intensify, _, exit_reason = search._should_intensify(
+            box_id=0,
+            basin=basin,
+            old_bounds=state.bounds.copy(),
+            new_bounds=weak_bounds,
+            late_stage_state=plateau_state,
+        )
+        self.assertTrue( should_intensify )
+        self.assertIn( exit_reason, ( "weak_shrink", "late_box" ) )
+
+    def test_late_stage_cadence_lowers_eval_batch_only_when_qualifying( self ) -> None:
+        search = AdaptiveGridSmoothLifeSearch(
+            sphere,
+            bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ],
+            smoothlife_config=SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=16, snapshot_interval=1, preset="search" ),
+            agsls_config=AGSLSConfig( late_stage_eval_batch=8 ),
+        )
+        self.assertEqual(
+            search._late_stage_step_batch(
+                16,
+                late_stage_state={
+                    "late_stage_mode": False,
+                    "plateau": False,
+                    "small_box": False,
+                    "late": False,
+                    "intensification_rounds": 0,
+                },
+            ),
+            16,
+        )
+        self.assertEqual(
+            search._late_stage_step_batch(
+                16,
+                late_stage_state={
+                    "late_stage_mode": True,
+                    "plateau": True,
+                    "small_box": False,
+                    "late": False,
+                    "intensification_rounds": 0,
+                },
+            ),
+            8,
+        )
 
     def test_zoom_cycles_shrink_bounds_and_become_more_frequent( self ) -> None:
         smoothlife = SmoothLifeConfig( grid_shape=( 48, 48 ), evaluations_per_step=4, objective_coupling=0.35, snapshot_interval=1, preset="search" )
@@ -362,6 +621,146 @@ class TestAGSLS( unittest.TestCase ):
         self.assertEqual( len( search.zoom_events ), 1 )
         self.assertEqual( search.engine.snapshots[ -1 ].metadata.get( "zoom_decision" ), "accepted" )
         self.assertEqual( search.engine.snapshots[ -1 ].metadata.get( "zoom_reason" ), "exploration_cap" )
+
+    def test_similar_groups_probe_once_before_zooming( self ) -> None:
+        smoothlife = SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=3, snapshot_interval=1, preset="search" )
+        agsls = AGSLSConfig(
+            max_zoom_cycles=1,
+            candidate_probe_evaluations=2,
+            undecided_stage_max_evaluations=6,
+            dominance_margin=0.20,
+            similarity_margin=0.05,
+            max_evaluations=100,
+        )
+        search = AdaptiveGridSmoothLifeSearch( sphere, bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ], smoothlife_config=smoothlife, agsls_config=agsls )
+        search.reset( seed=3 )
+        state = search.engine.state
+        self.assertIsNotNone( state )
+        basin_a = _make_basin(
+            search.engine.config.grid_shape,
+            state.bounds,
+            2,
+            2,
+            7,
+            7,
+            score=0.70,
+            alive_density=0.7,
+            best_value=float( state.local_best_value ),
+        )
+        basin_b = _make_basin(
+            search.engine.config.grid_shape,
+            state.bounds,
+            10,
+            10,
+            15,
+            15,
+            score=0.68,
+            alive_density=0.68,
+            best_value=float( state.local_best_value ),
+        )
+        search.engine.explore_top_pixels = MagicMock( return_value=2 )
+        search.engine.remap_to_bounds = MagicMock()
+        with patch.object( search, "_persistence_map", return_value=np.zeros( search.engine.config.grid_shape ) ):
+            with patch.object( search, "_rank_basins", return_value=[ basin_a, basin_b ] ):
+                with patch.object( search, "_probe_basins", return_value=None ):
+                    accepted = search.step()
+        self.assertTrue( accepted )
+        self.assertEqual( search.engine.explore_top_pixels.call_count, 1 )
+        self.assertEqual( search.engine.explore_top_pixels.call_args.args[ 0 ], 2 )
+        self.assertEqual( search.engine.snapshots[ -1 ].metadata.get( "zoom_reason" ), "similar_groups" )
+
+    def test_deferred_no_shrink_routes_into_late_stage_intensification( self ) -> None:
+        smoothlife = SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=6, snapshot_interval=1, preset="search" )
+        agsls = AGSLSConfig( max_zoom_cycles=1, late_stage_max_rounds=1, late_stage_eval_batch=2, max_evaluations=100 )
+        search = AdaptiveGridSmoothLifeSearch( sphere, bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ], smoothlife_config=smoothlife, agsls_config=agsls )
+        search.reset( seed=4 )
+        state = search.engine.state
+        self.assertIsNotNone( state )
+        basin = _make_basin(
+            search.engine.config.grid_shape,
+            state.bounds,
+            2,
+            2,
+            8,
+            8,
+            score=0.9,
+            alive_density=0.7,
+            best_value=float( state.local_best_value ),
+        )
+        basin.incumbent_in_envelope = True
+        search.engine.explore_top_pixels = MagicMock( return_value=2 )
+        search.engine.remap_to_bounds = MagicMock()
+        with patch.object( search, "_persistence_map", return_value=np.zeros( search.engine.config.grid_shape ) ):
+            with patch.object( search, "_rank_basins", return_value=[ basin ] ):
+                with patch.object( search, "_probe_basins", return_value=None ):
+                    with patch.object( search, "_padded_bounds", return_value=state.bounds.copy() ):
+                        accepted = search.step()
+        self.assertFalse( accepted )
+        search.engine.remap_to_bounds.assert_not_called()
+        self.assertEqual( search.engine.snapshots[ -1 ].metadata.get( "zoom_decision" ), "late_stage_intensify" )
+        self.assertEqual( search.engine.snapshots[ -1 ].metadata.get( "zoom_reason" ), "late_stage_intensify" )
+        self.assertEqual( search._decision_trace[ -1 ][ "decision_reason" ], "late_stage_intensify" )
+        self.assertTrue( bool( search._decision_trace[ -1 ][ "late_stage_mode" ] ) )
+        self.assertIn( "projected_shrink_ratio", search._decision_trace[ -1 ] )
+        self.assertIn( "focus_mask_coverage", search._decision_trace[ -1 ] )
+
+    def test_late_stage_resume_zoom_records_diagnostics( self ) -> None:
+        smoothlife = SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=6, snapshot_interval=1, preset="search" )
+        agsls = AGSLSConfig( max_zoom_cycles=1, late_stage_max_rounds=1, late_stage_eval_batch=2, max_evaluations=100 )
+        search = AdaptiveGridSmoothLifeSearch( sphere, bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ], smoothlife_config=smoothlife, agsls_config=agsls )
+        search.reset( seed=6 )
+        state = search.engine.state
+        self.assertIsNotNone( state )
+        basin = _make_basin(
+            search.engine.config.grid_shape,
+            state.bounds,
+            4,
+            4,
+            12,
+            12,
+            score=0.95,
+            alive_density=0.75,
+            best_value=float( state.local_best_value ),
+        )
+        basin.better_than_incumbent = True
+        search._late_stage_round_counts[ 0 ] = 1
+        smaller_bounds = state.bounds.copy()
+        smaller_bounds[ 0, 0 ] += 2.0
+        smaller_bounds[ 0, 1 ] -= 2.0
+        smaller_bounds[ 1, 0 ] += 2.0
+        smaller_bounds[ 1, 1 ] -= 2.0
+        search.engine.remap_to_bounds = MagicMock()
+        with patch.object( search, "_persistence_map", return_value=np.zeros( search.engine.config.grid_shape ) ):
+            with patch.object( search, "_rank_basins", return_value=[ basin ] ):
+                with patch.object( search, "_probe_basins", return_value=None ):
+                    with patch.object( search, "_padded_bounds", return_value=smaller_bounds ):
+                        accepted = search.step()
+        self.assertTrue( accepted )
+        self.assertEqual( len( search.zoom_events ), 1 )
+        self.assertEqual( search.zoom_events[ 0 ].diagnostics.get( "decision_reason" ), "late_stage_resume_zoom" )
+        self.assertEqual( search.zoom_events[ 0 ].diagnostics.get( "late_stage_exit_reason" ), "resume_zoom" )
+        self.assertEqual( search._decision_trace[ -1 ][ "decision_reason" ], "late_stage_resume_zoom" )
+        self.assertIn( "projected_shrink_ratio", search.zoom_events[ 0 ].diagnostics )
+        self.assertIn( "focus_mask_coverage", search.zoom_events[ 0 ].diagnostics )
+
+    def test_known_optimum_stays_inside_zoom_bounds_for_observed_failed_seeds( self ) -> None:
+        smoothlife = SmoothLifeConfig( grid_shape=( 64, 64 ), evaluations_per_step=8, objective_coupling=0.35, snapshot_interval=9999, preset="search" )
+        agsls = AGSLSConfig( max_zoom_cycles=5, max_evaluations=1600 )
+        cases = (
+            ( "sphere", sphere, [ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ], ( 0, 1, 8, 13, 15 ) ),
+            ( "ackley", ackley, [ ( -5.0, 5.0 ), ( -5.0, 5.0 ) ], ( 0, 3, 6, 11, 15, 16 ) ),
+        )
+        optimum = np.asarray( [ 0.0, 0.0 ], dtype=float )
+        for objective_name, objective, bounds, seeds in cases:
+            for seed in seeds:
+                with self.subTest( objective=objective_name, seed=seed ):
+                    search = AdaptiveGridSmoothLifeSearch( objective, bounds=bounds, smoothlife_config=smoothlife, agsls_config=agsls )
+                    search.reset( seed=seed )
+                    run = search.run( evaluations=1600 )
+                    self.assertGreater( len( run.zoom_events ), 0 )
+                    for event in run.zoom_events:
+                        contains_optimum = bool( np.all( ( optimum >= event.new_bounds[ :, 0 ] ) & ( optimum <= event.new_bounds[ :, 1 ] ) ) )
+                        self.assertTrue( contains_optimum )
 
 
 class TestVisualization( unittest.TestCase ):

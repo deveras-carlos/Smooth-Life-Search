@@ -438,6 +438,8 @@ class SmoothLifeSearch:
         alive_core_threshold: float = 0.30,
         cluster_eps_pixels: float = 2.5,
         cluster_min_samples: int = 6,
+        basin_envelope_quantile_offset: float = 0.08,
+        basin_envelope_growth_pixels: int = 1,
     ) -> list[ Basin ]:
         """Extract promising dense groups from the current support field."""
 
@@ -454,6 +456,10 @@ class SmoothLifeSearch:
             min_cells=min_cells,
             cluster_eps_pixels=cluster_eps_pixels,
             cluster_min_samples=cluster_min_samples,
+            basin_envelope_quantile_offset=basin_envelope_quantile_offset,
+            basin_envelope_growth_pixels=basin_envelope_growth_pixels,
+            global_best_point=state.best_point,
+            global_best_value=state.best_value,
         )
 
     def snapshot( self ) -> SmoothLifeSnapshot:

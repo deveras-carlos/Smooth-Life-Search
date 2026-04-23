@@ -4,6 +4,7 @@ from .adaptive import FieldSchedule, RuntimeSignals, SchedulePolicy
 from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
 from .benchmarking import BenchmarkSummary, run_seeded_trials, summarize_results
 from .benchmarks import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
+from .exploitation_study import ExploitationStudySpec, ExploitationStudySummary, run_exploitation_study
 from .objectives import DEFAULT_BOUNDS, OBJECTIVES
 from .results import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
 from .smoothlife import SmoothLifeConfig, SmoothLifeSearch
@@ -12,6 +13,8 @@ from .visualization import open_run_viewer, render_run_frames, save_run_animatio
 
 __all__ = [
     "DEFAULT_BOUNDS",
+    "ExploitationStudySpec",
+    "ExploitationStudySummary",
     "FieldSchedule",
     "OBJECTIVES",
     "AGSLSConfig",
@@ -35,6 +38,7 @@ __all__ = [
     "rastrigin",
     "render_run_frames",
     "rosenbrock",
+    "run_exploitation_study",
     "run_seeded_trials",
     "run_tuning_study",
     "save_run_animation",

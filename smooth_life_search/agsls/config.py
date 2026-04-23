@@ -18,6 +18,7 @@ class AGSLSConfig:
     zoom_padding: float = 0.20
     min_side_fraction: float = 1e-64
     max_evaluations: int | None = None
+    zoom_cycles_budget_baseline: int | None = 800
     mass_weight: float = 1.0
     alive_density_weight: float = 0.75
     objective_weight: float = 1.5
@@ -31,6 +32,19 @@ class AGSLSConfig:
     similarity_margin: float = 0.05
     undecided_stage_max_evaluations: int = 64
     candidate_probe_evaluations: int = 16
+    basin_envelope_quantile_offset: float = 0.08
+    basin_envelope_growth_pixels: int = 1
+    min_zoom_cells: int = 6
+    incumbent_overlap_bonus: float = 0.20
+    incumbent_exclusion_penalty: float = 0.15
+    edge_risk_fraction: float = 0.20
+    late_stage_zoom_fraction_threshold: float = 0.60
+    late_stage_plateau_threshold: float = 1e-4
+    late_stage_min_shrink_ratio: float = 0.85
+    late_stage_max_rounds: int = 2
+    late_stage_eval_batch: int = 8
+    late_stage_elite_k: int = 4
+    late_stage_focus_radius_cells: int = 3
 
     def __post_init__(self) -> None:
         if self.max_zoom_cycles <= 0:
@@ -61,3 +75,31 @@ class AGSLSConfig:
             raise ValueError("undecided_stage_max_evaluations must be non-negative")
         if self.candidate_probe_evaluations < 0:
             raise ValueError("candidate_probe_evaluations must be non-negative")
+        if not 0.0 <= self.basin_envelope_quantile_offset <= 0.49:
+            raise ValueError("basin_envelope_quantile_offset must be in [0, 0.49]")
+        if self.basin_envelope_growth_pixels < 0:
+            raise ValueError("basin_envelope_growth_pixels must be non-negative")
+        if self.min_zoom_cells <= 0:
+            raise ValueError("min_zoom_cells must be positive")
+        if self.incumbent_overlap_bonus < 0.0:
+            raise ValueError("incumbent_overlap_bonus must be non-negative")
+        if self.incumbent_exclusion_penalty < 0.0:
+            raise ValueError("incumbent_exclusion_penalty must be non-negative")
+        if not 0.0 <= self.edge_risk_fraction <= 0.5:
+            raise ValueError("edge_risk_fraction must be in [0, 0.5]")
+        if self.zoom_cycles_budget_baseline is not None and self.zoom_cycles_budget_baseline <= 0:
+            raise ValueError("zoom_cycles_budget_baseline must be positive when set")
+        if not 0.0 <= self.late_stage_zoom_fraction_threshold <= 1.0:
+            raise ValueError("late_stage_zoom_fraction_threshold must be in [0, 1]")
+        if self.late_stage_plateau_threshold < 0.0:
+            raise ValueError("late_stage_plateau_threshold must be non-negative")
+        if not 0.0 < self.late_stage_min_shrink_ratio <= 1.0:
+            raise ValueError("late_stage_min_shrink_ratio must be in (0, 1]")
+        if self.late_stage_max_rounds < 0:
+            raise ValueError("late_stage_max_rounds must be non-negative")
+        if self.late_stage_eval_batch <= 0:
+            raise ValueError("late_stage_eval_batch must be positive")
+        if self.late_stage_elite_k <= 0:
+            raise ValueError("late_stage_elite_k must be positive")
+        if self.late_stage_focus_radius_cells <= 0:
+            raise ValueError("late_stage_focus_radius_cells must be positive")

@@ -164,6 +164,22 @@ class TestRuntimePolicies(unittest.TestCase):
         self.assertEqual(search._rebuild_kernels.call_count, 1)
         self.assertGreater(float(search.config.diffusion), 0.0)
 
+    def test_late_stage_reactive_allowed_in_relevant_scopes(self) -> None:
+        kinds = tuning_module.FIELD_SCOPE_SCHEDULE_KINDS
+        self.assertIn("late_stage_reactive", kinds["sls_per_step"])
+        self.assertIn("late_stage_reactive", kinds["agsls_decision"])
+
+    def test_cadence_families_registered(self) -> None:
+        registry = tuning_module.FAMILY_REGISTRY
+        self.assertIn("smoothlife_cadence", registry)
+        self.assertIn("agsls_cadence", registry)
+        self.assertEqual(registry["smoothlife_cadence"].family_scope, "sls_per_step")
+        self.assertEqual(registry["agsls_cadence"].family_scope, "agsls_decision")
+        self.assertEqual(registry["smoothlife_cadence"].applicable_variants, ("agsls",))
+        self.assertEqual(registry["agsls_cadence"].applicable_variants, ("agsls",))
+        self.assertIn("late_stage_reactive", registry["smoothlife_cadence"].schedule_kinds)
+        self.assertIn("late_stage_reactive", registry["agsls_cadence"].schedule_kinds)
+
     def test_decision_gap_reactive_schedule_uses_basin_count_and_gap(self) -> None:
         schedule = FieldSchedule(
             "candidate_probe_evaluations",

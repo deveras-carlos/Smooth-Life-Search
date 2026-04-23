@@ -82,6 +82,7 @@ SCHEDULE_MODES = frozenset(
         "budget_sigmoid",
         "plateau_reactive",
         "decision_gap_reactive",
+        "late_stage_reactive",
     }
 )
 
@@ -189,6 +190,7 @@ class FieldSchedule:
     low_value: Any | None = None
     high_value: Any | None = None
     plateau_threshold: float = 1e-6
+    zoom_fraction_threshold: float = 0.6
 
     def __post_init__(self) -> None:
         if self.mode not in SCHEDULE_MODES:
@@ -220,6 +222,12 @@ class FieldSchedule:
                 return _coerce_like(self.base_value, float(self.high_value))
             if self.low_value is not None:
                 return _coerce_like(self.base_value, float(self.low_value))
+            return self.base_value
+        if self.mode == "late_stage_reactive":
+            late = signals.zoom_fraction() >= self.zoom_fraction_threshold
+            plateau = max(float(signals.global_improvement), float(signals.stage_improvement)) <= self.plateau_threshold
+            if (late or plateau) and self.high_value is not None:
+                return _coerce_like(self.base_value, float(self.high_value))
             return self.base_value
         raise RuntimeError(f"unsupported schedule mode: {self.mode}")
 

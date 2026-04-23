@@ -11,10 +11,12 @@ from typing import Any
 from . import (
     AGSLSConfig,
     AdaptiveGridSmoothLifeSearch,
+    ExploitationStudySpec,
     SmoothLifeConfig,
     SmoothLifeSearch,
     StudySpec,
     open_run_viewer,
+    run_exploitation_study,
     run_seeded_trials,
     save_run_animation,
     summarize_results,
@@ -77,6 +79,7 @@ def _zoom_payload(run: Any) -> list[dict[str, Any]]:
             "selected_basin_score": event.selected_basin_score,
             "selected_basin_bbox": event.selected_basin_bbox.tolist(),
             "evaluation_count": event.evaluation_count,
+            "diagnostics": dict( getattr( event, "diagnostics", {} ) ),
         }
         for event in run.zoom_events
     ]
@@ -289,6 +292,33 @@ def _build_tune_spec(args: argparse.Namespace) -> StudySpec:
     )
 
 
+def _build_exploit_spec(args: argparse.Namespace) -> ExploitationStudySpec:
+    return ExploitationStudySpec(
+        output_dir=Path(args.output_dir),
+        objectives=tuple(_parse_csv_list(args.objectives)),
+        static_budgets=tuple(_parse_csv_list(args.static_budgets, cast=int)),
+        adaptive_screen_budgets=tuple(_parse_csv_list(args.adaptive_screen_budgets, cast=int)),
+        confirmation_budgets=tuple(_parse_csv_list(args.confirmation_budgets, cast=int)),
+        seed_start=int(args.seed_start),
+        stage1_seeds=int(args.stage1_seeds),
+        stage2_seeds=int(args.stage2_seeds),
+        stage3_seeds=int(args.stage3_seeds),
+        grid_shape=_parse_grid(args.grid),
+        workers=None if args.workers is None else int(args.workers),
+        resume=not bool(args.no_resume),
+        parameter_families=tuple(_parse_csv_list(args.parameter_families)) if args.parameter_families else (
+            "diffusion",
+            "objective_guidance",
+            "evaluation_batch",
+            "basin_quantile",
+            "zoom_padding",
+            "probe_budget",
+            "decision_margins",
+        ),
+        preflight=not bool(args.no_preflight),
+    )
+
+
 def run_tune(args: argparse.Namespace) -> dict[str, Any]:
     summary = run_tuning_study(_build_tune_spec(args))
     return {
@@ -310,6 +340,26 @@ def run_tune(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def run_exploit(args: argparse.Namespace) -> dict[str, Any]:
+    summary = run_exploitation_study(_build_exploit_spec(args))
+    return {
+        "mode": "exploit",
+        "output_dir": str(summary.output_dir),
+        "total_trials": summary.total_trials,
+        "completed_trials": summary.completed_trials,
+        "skipped_trials": summary.skipped_trials,
+        "trials_path": str(summary.trials_path),
+        "decision_trace_path": str(summary.decision_trace_path),
+        "zoom_trace_path": str(summary.zoom_trace_path),
+        "per_objective_leaderboard_path": str(summary.per_objective_leaderboard_path),
+        "exploitation_metrics_path": str(summary.exploitation_metrics_path),
+        "adaptive_exploitation_path": str(summary.adaptive_exploitation_path),
+        "decision_phase_effects_path": str(summary.decision_phase_effects_path),
+        "family_manifest_path": str(summary.family_manifest_path),
+        "report_path": str(summary.report_path),
+    }
+
+
 def _print_tune(payload: dict[str, Any]) -> None:
     print(f"output dir: {payload['output_dir']}")
     print(f"total trials: {payload['total_trials']}")
@@ -324,6 +374,22 @@ def _print_tune(payload: dict[str, Any]) -> None:
     print(f"runtime efficiency: {payload['runtime_efficiency_path']}")
     print(f"family manifest: {payload['family_manifest_path']}")
     print(f"finalists: {payload['finalists_path']}")
+    print(f"report: {payload['report_path']}")
+
+
+def _print_exploit(payload: dict[str, Any]) -> None:
+    print(f"output dir: {payload['output_dir']}")
+    print(f"total trials: {payload['total_trials']}")
+    print(f"completed this run: {payload['completed_trials']}")
+    print(f"skipped from resume: {payload['skipped_trials']}")
+    print(f"trials: {payload['trials_path']}")
+    print(f"decision trace: {payload['decision_trace_path']}")
+    print(f"zoom trace: {payload['zoom_trace_path']}")
+    print(f"per-objective leaderboard: {payload['per_objective_leaderboard_path']}")
+    print(f"exploitation metrics: {payload['exploitation_metrics_path']}")
+    print(f"adaptive exploitation: {payload['adaptive_exploitation_path']}")
+    print(f"decision phase effects: {payload['decision_phase_effects_path']}")
+    print(f"family manifest: {payload['family_manifest_path']}")
     print(f"report: {payload['report_path']}")
 
 
@@ -404,6 +470,23 @@ def build_parser() -> argparse.ArgumentParser:
     tune.add_argument("--no-preflight", action="store_true", help="Skip the serial-vs-parallel smoke preflight check.")
     tune.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
+    exploit = subparsers.add_parser("exploit", help="Run the AGSLS exploitation adaptivity study.")
+    exploit.add_argument("--output-dir", type=str, default="exploitation-output", help="Directory for NDJSON results and derived artifacts.")
+    exploit.add_argument("--objectives", type=str, default="sphere,ackley,rastrigin,griewank,rosenbrock,himmelblau", help="Comma-separated objectives.")
+    exploit.add_argument("--static-budgets", type=str, default="400,800", help="Comma-separated budgets for fixed-parameter ablations.")
+    exploit.add_argument("--adaptive-screen-budgets", type=str, default="400,800,1600", help="Comma-separated budgets for adaptive screening.")
+    exploit.add_argument("--confirmation-budgets", type=str, default="400,800,1600", help="Comma-separated budgets for fixed-vs-adaptive confirmation.")
+    exploit.add_argument("--grid", type=str, default="64x64", help="Grid shape for all stages as HEIGHTxWIDTH.")
+    exploit.add_argument("--seed-start", type=int, default=0, help="First seed used in every stage.")
+    exploit.add_argument("--stage1-seeds", type=int, default=12, help="Number of seeds for the fixed-parameter stage.")
+    exploit.add_argument("--stage2-seeds", type=int, default=16, help="Number of seeds for the adaptive screening stage.")
+    exploit.add_argument("--stage3-seeds", type=int, default=20, help="Number of seeds for the confirmation stage.")
+    exploit.add_argument("--workers", type=int, default=None, help="Worker process count. Defaults to cpu_count() - 1.")
+    exploit.add_argument("--parameter-families", type=str, default=None, help="Optional comma-separated subset of exploitation families.")
+    exploit.add_argument("--no-resume", action="store_true", help="Ignore existing completed trials in the output directory.")
+    exploit.add_argument("--no-preflight", action="store_true", help="Skip the serial-vs-parallel smoke preflight check.")
+    exploit.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
     return parser
 
 
@@ -446,12 +529,19 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _print_tune(payload)
             return 0
+        if args.command == "exploit":
+            payload = run_exploit(args)
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                _print_exploit(payload)
+            return 0
     except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     return 1
 
 
-__all__ = ["build_parser", "main", "run_agsls_command", "run_benchmark", "run_simulation", "run_single", "run_tune"]
+__all__ = ["build_parser", "main", "run_agsls_command", "run_benchmark", "run_exploit", "run_simulation", "run_single", "run_tune"]
 
 
 if __name__ == "__main__":

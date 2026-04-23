@@ -58,10 +58,10 @@ ADAPTIVE_FIELD_NAMES = SMOOTHLIFE_PER_STEP_FIELDS | AGSLS_PER_DECISION_FIELDS | 
 
 FIELD_SCOPE_SCHEDULE_KINDS: dict[str, tuple[str, ...]] = {
     "static_only": (),
-    "sls_per_step": ("zoom_linear", "budget_sigmoid", "plateau_reactive"),
-    "agsls_per_step": ("zoom_linear", "budget_sigmoid", "plateau_reactive"),
-    "agsls_decision": ("zoom_linear", "budget_sigmoid", "plateau_reactive", "decision_gap_reactive"),
-    "agsls_zoom_boundary": ("zoom_linear", "budget_sigmoid", "plateau_reactive"),
+    "sls_per_step": ("zoom_linear", "budget_sigmoid", "plateau_reactive", "late_stage_reactive"),
+    "agsls_per_step": ("zoom_linear", "budget_sigmoid", "plateau_reactive", "late_stage_reactive"),
+    "agsls_decision": ("zoom_linear", "budget_sigmoid", "plateau_reactive", "decision_gap_reactive", "late_stage_reactive"),
+    "agsls_zoom_boundary": ("zoom_linear", "budget_sigmoid", "plateau_reactive", "late_stage_reactive"),
 }
 
 
@@ -349,6 +349,14 @@ def _cluster_shape_levels(_smoothlife: SmoothLifeConfig, _agsls: AGSLSConfig) ->
     )
 
 
+def _smoothlife_cadence_levels(_smoothlife: SmoothLifeConfig, _agsls: AGSLSConfig) -> tuple[dict[str, Any], ...]:
+    return tuple({"evaluations_per_step": value} for value in (24, 20, 16, 12, 8))
+
+
+def _agsls_cadence_levels(_smoothlife: SmoothLifeConfig, _agsls: AGSLSConfig) -> tuple[dict[str, Any], ...]:
+    return tuple({"initial_steps_per_zoom": value} for value in (48, 40, 32, 24, 16))
+
+
 FAMILY_DEFINITIONS: tuple[ParameterFamilyDefinition, ...] = (
     ParameterFamilyDefinition(
         "transition_window",
@@ -493,6 +501,22 @@ FAMILY_DEFINITIONS: tuple[ParameterFamilyDefinition, ...] = (
         ("agsls",),
         ("zoom_linear", "budget_sigmoid", "plateau_reactive"),
         _cluster_shape_levels,
+    ),
+    ParameterFamilyDefinition(
+        "smoothlife_cadence",
+        ("agsls",),
+        "sls_per_step",
+        ("agsls",),
+        ("zoom_linear", "budget_sigmoid", "plateau_reactive", "late_stage_reactive"),
+        _smoothlife_cadence_levels,
+    ),
+    ParameterFamilyDefinition(
+        "agsls_cadence",
+        ("agsls",),
+        "agsls_decision",
+        ("agsls",),
+        ("zoom_linear", "budget_sigmoid", "plateau_reactive", "late_stage_reactive"),
+        _agsls_cadence_levels,
     ),
 )
 
