@@ -1,0 +1,7 @@
+"""Repo-root wrapper for the packaged CLI entrypoint."""
+
+from smooth_life_search.cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,68 @@
+"""Known SmoothLife parameter presets."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from .config import SmoothLifeConfig
+
+
+PRESET_BUILDERS: dict[str, SmoothLifeConfig] = {
+    "paper_glider": SmoothLifeConfig(
+        birth_low=0.278,
+        birth_high=0.365,
+        death_low=0.267,
+        death_high=0.445,
+        alpha_n=0.028,
+        alpha_m=0.147,
+        inner_radius=7.0,
+        outer_radius=21.0,
+        dt=0.25,
+        diffusion=0.10,
+        objective_coupling=0.0,
+        run_mode="simulation",
+    ),
+    "search": SmoothLifeConfig(
+        birth_low=0.278,
+        birth_high=0.365,
+        death_low=0.267,
+        death_high=0.445,
+        alpha_n=0.028,
+        alpha_m=0.147,
+        inner_radius=7.0,
+        outer_radius=21.0,
+        dt=0.25,
+        diffusion=0.10,
+        objective_coupling=0.30,
+        run_mode="search",
+    ),
+}
+
+
+def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
+    """Resolve a preset onto a config instance."""
+
+    if config.preset is None:
+        return config
+    if config.preset not in PRESET_BUILDERS:
+        raise ValueError(f"unknown SmoothLife preset: {config.preset}")
+    preset = PRESET_BUILDERS[config.preset]
+    return replace(
+        preset,
+        grid_shape=config.grid_shape,
+        anti_alias_radius=config.anti_alias_radius,
+        dt=config.dt,
+        diffusion=config.diffusion,
+        objective_coupling=config.objective_coupling,
+        field_floor=config.field_floor,
+        field_ceiling=config.field_ceiling,
+        initial_field_center=config.initial_field_center,
+        initial_field_noise=config.initial_field_noise,
+        evaluations_per_step=config.evaluations_per_step,
+        snapshot_interval=config.snapshot_interval,
+        time_mode=config.time_mode,
+        run_mode=config.run_mode,
+        maximize=config.maximize,
+        preset=config.preset,
+        store_all_snapshots=config.store_all_snapshots,
+    )
