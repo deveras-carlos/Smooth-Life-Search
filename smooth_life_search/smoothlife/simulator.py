@@ -19,6 +19,7 @@ from ..core import (
 )
 from .basins import detect_basins
 from .config import SmoothLifeConfig
+from .evaluation import blank_objective_cache, best_evaluated_flat_index, evaluation_points, normalized_objective_field
 from .kernels import build_disk_kernel, build_ring_kernel, periodic_convolve2d
 from .presets import apply_preset
 from .remap import remap_field_to_bounds
@@ -90,12 +91,7 @@ class SmoothLifeSearch:
         return np.clip( field, self.config.field_floor, self.config.field_ceiling )
 
     def _blank_objective_cache( self ) -> tuple[ np.ndarray, np.ndarray, np.ndarray ]:
-        shape = self.config.grid_shape
-        return (
-            np.full( shape, np.nan, dtype=float ),
-            np.full( shape, 0.5, dtype=float ),
-            np.zeros( shape, dtype=bool ),
-        )
+        return blank_objective_cache( self.config.grid_shape )
 
     def _default_point( self, bounds: np.ndarray ) -> np.ndarray:
         return np.mean( bounds, axis=1 )
@@ -283,35 +279,22 @@ class SmoothLifeSearch:
 
     def _refresh_objective_field( self ) -> None:
         state = self._require_state()
-        state.objective_field.fill( 0.5 )
-        if not np.any( state.evaluated_mask ):
-            return
-        explored_values = state.objective_values[ state.evaluated_mask ]
-        min_value = float( np.min( explored_values ) )
-        max_value = float( np.max( explored_values ) )
-        span = max( max_value - min_value, 1e-12 )
-        if explored_values.size < 2 or span <= 1e-12:
-            state.objective_field[ state.evaluated_mask ] = 1.0
-            return
-        if self.config.maximize:
-            normalized = ( explored_values - min_value ) / span
-        else:
-            normalized = ( max_value - explored_values ) / span
-        state.objective_field[ state.evaluated_mask ] = np.clip( normalized, 0.0, 1.0 )
+        state.objective_field = normalized_objective_field(
+            state.objective_values,
+            state.evaluated_mask,
+            maximize=self.config.maximize,
+        )
 
     def _update_best_records( self ) -> None:
         state = self._require_state()
-        if not np.any( state.evaluated_mask ):
+        best_flat = best_evaluated_flat_index(
+            state.objective_values,
+            state.evaluated_mask,
+            maximize=self.config.maximize,
+        )
+        if best_flat is None:
             return
-        flat_mask = state.evaluated_mask.ravel()
         flat_values = state.objective_values.ravel()
-        explored_indices = np.flatnonzero( flat_mask )
-        explored_values = flat_values[ explored_indices ]
-        if self.config.maximize:
-            local_offset = int( np.argmax( explored_values ) )
-        else:
-            local_offset = int( np.argmin( explored_values ) )
-        best_flat = int( explored_indices[ local_offset ] )
         candidate_point = self._flat_index_to_point( best_flat, state.bounds )
         candidate_value = float( flat_values[ best_flat ] )
         state.box_best_point = candidate_point.copy()
@@ -324,10 +307,7 @@ class SmoothLifeSearch:
             state.local_best_value = candidate_value
 
     def _evaluation_points( self, rows: np.ndarray, cols: np.ndarray, bounds: np.ndarray ) -> np.ndarray:
-        height, width = self.config.grid_shape
-        x = bounds[ 0, 0 ] + ( ( cols.astype( float ) + 0.5 ) / width ) * ( bounds[ 0, 1 ] - bounds[ 0, 0 ] )
-        y = bounds[ 1, 0 ] + ( ( rows.astype( float ) + 0.5 ) / height ) * ( bounds[ 1, 1 ] - bounds[ 1, 0 ] )
-        return np.column_stack( ( x, y ) )
+        return evaluation_points( rows, cols, bounds, self.config.grid_shape )
 
     def evaluate_pixels( self, rows: np.ndarray, cols: np.ndarray ) -> int:
         """Evaluate a batch of pixels that have not been explored yet."""
