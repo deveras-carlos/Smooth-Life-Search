@@ -23,6 +23,7 @@ from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.search import SmoothLifeSearch
 from .budget import bounded_evaluation_batch, effective_zoom_limit, max_evaluations_reached, remaining_evaluations
 from .config import AGSLSConfig
+from .geometry import centered_bounds, enforce_min_side_fraction, expand_bounds_to_min_widths, finalize_zoom_bounds, minimum_zoom_widths
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
 from .selection import eligible_basins, select_basin, should_choose_leader
@@ -114,38 +115,13 @@ class AdaptiveGridSmoothLifeSearch:
         return float( value ) if self.engine.config.maximize else -float( value )
 
     def _minimum_zoom_widths( self, current_bounds: np.ndarray ) -> np.ndarray:
-        height, width = self.engine.config.grid_shape
-        current_widths = np.asarray( current_bounds, dtype=float )[ :, 1 ] - np.asarray( current_bounds, dtype=float )[ :, 0 ]
-        cell_widths = np.asarray( [ current_widths[ 0 ] / width, current_widths[ 1 ] / height ], dtype=float )
-        return self.agsls_config.min_zoom_cells * cell_widths
+        return minimum_zoom_widths( current_bounds, self.engine.config.grid_shape, self.agsls_config )
 
     def _enforce_min_side_fraction( self, bounds: np.ndarray, current_bounds: np.ndarray ) -> np.ndarray:
-        new_bounds = np.asarray( bounds, dtype=float ).copy()
-        min_widths = self.agsls_config.min_side_fraction * ( self.original_bounds[ :, 1 ] - self.original_bounds[ :, 0 ] )
-        widths = new_bounds[ :, 1 ] - new_bounds[ :, 0 ]
-        for idx in range( 2 ):
-            if widths[ idx ] >= min_widths[ idx ]:
-                continue
-            center = 0.5 * ( new_bounds[ idx, 0 ] + new_bounds[ idx, 1 ] )
-            half_width = 0.5 * min_widths[ idx ]
-            lower = max( current_bounds[ idx, 0 ], center - half_width )
-            upper = min( current_bounds[ idx, 1 ], center + half_width )
-            if upper - lower < min_widths[ idx ]:
-                if lower <= current_bounds[ idx, 0 ]:
-                    upper = min( current_bounds[ idx, 1 ], lower + min_widths[ idx ] )
-                else:
-                    lower = max( current_bounds[ idx, 0 ], upper - min_widths[ idx ] )
-            new_bounds[ idx, 0 ] = lower
-            new_bounds[ idx, 1 ] = upper
-        return new_bounds
+        return enforce_min_side_fraction( bounds, current_bounds, self.original_bounds, self.agsls_config )
 
     def _centered_bounds( self, center: np.ndarray, widths: np.ndarray, current_bounds: np.ndarray ) -> np.ndarray:
-        resolved_center = np.asarray( center, dtype=float )
-        resolved_widths = np.asarray( widths, dtype=float )
-        bounds = np.column_stack( ( resolved_center - 0.5 * resolved_widths, resolved_center + 0.5 * resolved_widths ) )
-        bounds[ :, 0 ] = np.maximum( bounds[ :, 0 ], current_bounds[ :, 0 ] )
-        bounds[ :, 1 ] = np.minimum( bounds[ :, 1 ], current_bounds[ :, 1 ] )
-        return self._expand_bounds_to_min_widths( bounds, resolved_center, resolved_widths, current_bounds )
+        return centered_bounds( center, widths, current_bounds )
 
     def _finalize_zoom_bounds(
         self,
@@ -156,42 +132,16 @@ class AdaptiveGridSmoothLifeSearch:
         anchor_point: np.ndarray | None = None,
         incumbent_point: np.ndarray | None = None,
     ) -> np.ndarray:
-        min_zoom_widths = self._minimum_zoom_widths( current_bounds )
-        resolved_center = np.asarray( center, dtype=float )
-        new_bounds = self._expand_bounds_to_min_widths(
-            np.asarray( bounds, dtype=float ),
-            resolved_center,
-            min_zoom_widths,
+        return finalize_zoom_bounds(
+            bounds,
+            center,
             current_bounds,
+            self.original_bounds,
+            self.engine.config.grid_shape,
+            self.agsls_config,
+            anchor_point=anchor_point,
+            incumbent_point=incumbent_point,
         )
-        anchor = resolved_center if anchor_point is None else np.asarray( anchor_point, dtype=float )
-        widths = new_bounds[ :, 1 ] - new_bounds[ :, 0 ]
-        directional_padding = self.agsls_config.zoom_padding * widths
-        for idx in range( 2 ):
-            edge_band = self.agsls_config.edge_risk_fraction * max( widths[ idx ], 1e-12 )
-            if anchor[ idx ] - new_bounds[ idx, 0 ] <= edge_band:
-                new_bounds[ idx, 0 ] -= directional_padding[ idx ]
-            if new_bounds[ idx, 1 ] - anchor[ idx ] <= edge_band:
-                new_bounds[ idx, 1 ] += directional_padding[ idx ]
-        if incumbent_point is not None and np.all( np.isfinite( incumbent_point ) ):
-            resolved_incumbent = np.asarray( incumbent_point, dtype=float )
-            for idx in range( 2 ):
-                if resolved_incumbent[ idx ] < current_bounds[ idx, 0 ] or resolved_incumbent[ idx ] > current_bounds[ idx, 1 ]:
-                    continue
-                width = max( float( new_bounds[ idx, 1 ] - new_bounds[ idx, 0 ] ), float( min_zoom_widths[ idx ] ) )
-                edge_band = self.agsls_config.edge_risk_fraction * width
-                if resolved_incumbent[ idx ] < new_bounds[ idx, 0 ]:
-                    new_bounds[ idx, 0 ] = max( current_bounds[ idx, 0 ], resolved_incumbent[ idx ] - edge_band )
-                elif resolved_incumbent[ idx ] > new_bounds[ idx, 1 ]:
-                    new_bounds[ idx, 1 ] = min( current_bounds[ idx, 1 ], resolved_incumbent[ idx ] + edge_band )
-        widths = new_bounds[ :, 1 ] - new_bounds[ :, 0 ]
-        padding = self.agsls_config.zoom_padding * widths
-        new_bounds[ :, 0 ] -= padding
-        new_bounds[ :, 1 ] += padding
-        new_bounds[ :, 0 ] = np.maximum( new_bounds[ :, 0 ], current_bounds[ :, 0 ] )
-        new_bounds[ :, 1 ] = np.minimum( new_bounds[ :, 1 ], current_bounds[ :, 1 ] )
-        new_bounds = self._expand_bounds_to_min_widths( new_bounds, resolved_center, min_zoom_widths, current_bounds )
-        return self._enforce_min_side_fraction( new_bounds, current_bounds )
 
     @staticmethod
     def _empty_microgrid_summary() -> dict[ str, object ]:
@@ -1262,25 +1212,7 @@ class AdaptiveGridSmoothLifeSearch:
         min_widths: np.ndarray,
         current_bounds: np.ndarray,
     ) -> np.ndarray:
-        expanded = np.asarray( bounds, dtype=float ).copy()
-        center = np.asarray( center, dtype=float )
-        for idx in range( 2 ):
-            width = float( expanded[ idx, 1 ] - expanded[ idx, 0 ] )
-            if width >= float( min_widths[ idx ] ):
-                continue
-            half_width = 0.5 * float( min_widths[ idx ] )
-            resolved_center = float( np.clip( center[ idx ], current_bounds[ idx, 0 ], current_bounds[ idx, 1 ] ) )
-            lower = resolved_center - half_width
-            upper = resolved_center + half_width
-            if lower < current_bounds[ idx, 0 ]:
-                upper += current_bounds[ idx, 0 ] - lower
-                lower = current_bounds[ idx, 0 ]
-            if upper > current_bounds[ idx, 1 ]:
-                lower -= upper - current_bounds[ idx, 1 ]
-                upper = current_bounds[ idx, 1 ]
-            expanded[ idx, 0 ] = max( current_bounds[ idx, 0 ], lower )
-            expanded[ idx, 1 ] = min( current_bounds[ idx, 1 ], upper )
-        return expanded
+        return expand_bounds_to_min_widths( bounds, center, min_widths, current_bounds )
 
     def _padded_bounds( self, basin: Basin ) -> np.ndarray:
         state = self.engine.state
