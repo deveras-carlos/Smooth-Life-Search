@@ -25,6 +25,7 @@ from .budget import bounded_evaluation_batch, effective_zoom_limit, max_evaluati
 from .config import AGSLSConfig
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
+from .selection import eligible_basins, select_basin, should_choose_leader
 
 Objective = Callable[[ np.ndarray ], float]
 
@@ -1243,59 +1244,16 @@ class AdaptiveGridSmoothLifeSearch:
             )
 
     def _eligible_basins( self, basins: list[ Basin ] ) -> list[ Basin ]:
-        eligible: list[ Basin ] = [ ]
-        for basin in basins:
-            if basin.area < self.agsls_config.min_basin_cells:
-                continue
-            if basin.alive_density < self.agsls_config.min_alive_density:
-                continue
-            eligible.append( basin )
-        return eligible
+        return eligible_basins( basins, self.agsls_config )
 
     def _should_choose_leader( self, basins: list[ Basin ], explored_in_stage: int ) -> tuple[ bool, str ]:
-        if not basins:
-            return False, "no_group"
-        if len( basins ) == 1:
-            return True, "single_group"
-        score_gap = float( basins[ 0 ].combined_score - basins[ 1 ].combined_score )
-        if score_gap >= self.agsls_config.dominance_margin:
-            return True, "dominant_group"
-        if score_gap <= self.agsls_config.similarity_margin:
-            if explored_in_stage <= 0 and self.agsls_config.candidate_probe_evaluations > 0:
-                return False, "similar_groups_probe"
-            return True, "similar_groups"
-        if explored_in_stage >= self.agsls_config.undecided_stage_max_evaluations:
-            return True, "exploration_cap"
-        union_mask = np.zeros_like( basins[ 0 ].mask, dtype=bool )
-        for basin in basins:
-            union_mask |= basin.mask
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
-        if not np.any( union_mask & ~state.evaluated_mask ):
-            return True, "no_unexplored_cells"
-        return False, "continue_exploring"
+        return should_choose_leader( basins, explored_in_stage, self.agsls_config, state )
 
     def _select_basin( self, basins: list[ Basin ] ) -> Basin:
-        if len( basins ) <= 1:
-            return basins[ 0 ]
-        top_score = float( basins[ 0 ].combined_score )
-        contenders = [
-            basin
-            for basin in basins
-            if top_score - float( basin.combined_score ) <= self.agsls_config.similarity_margin
-        ]
-        if len( contenders ) <= 1:
-            return basins[ 0 ]
-        return max(
-            contenders,
-            key=lambda basin: (
-                float( basin.best_objective_score ) if basin.evaluated_count > 0 else -np.inf,
-                float( basin.stability_score ),
-                -int( basin.area ),
-                float( basin.combined_score ),
-            ),
-        )
+        return select_basin( basins, self.agsls_config )
 
     def _expand_bounds_to_min_widths(
         self,
