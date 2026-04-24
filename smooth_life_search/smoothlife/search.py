@@ -319,7 +319,13 @@ class SmoothLifeSearch:
             return
         flat_values = state.objective_values.ravel()
         candidate_value = float( flat_values[ best_flat ] )
-        candidate_point = self._subpixel_best_point( best_flat, state )
+        candidate_point, has_subpixel_offset = self._subpixel_best_candidate( best_flat, state )
+        if has_subpixel_offset and self.config.subpixel_confirm:
+            confirmed = self._confirm_subpixel_candidate( candidate_point )
+            if confirmed is not None and self._is_better( confirmed, candidate_value ):
+                candidate_value = float( confirmed )
+            else:
+                candidate_point = self._flat_index_to_point( best_flat, state.bounds )
         state.box_best_point = candidate_point.copy()
         state.box_best_value = candidate_value
         if not np.isfinite( state.best_value ) or self._is_better( candidate_value, state.best_value ):
@@ -330,9 +336,12 @@ class SmoothLifeSearch:
             state.local_best_value = candidate_value
 
     def _subpixel_best_point( self, best_flat: int, state: SmoothLifeState ) -> np.ndarray:
+        return self._subpixel_best_candidate( best_flat, state )[ 0 ]
+
+    def _subpixel_best_candidate( self, best_flat: int, state: SmoothLifeState ) -> tuple[ np.ndarray, bool ]:
         row, col = np.unravel_index( int( best_flat ), self.config.grid_shape )
         if not self.config.subpixel_best_point:
-            return self._pixel_center( int( row ), int( col ), state.bounds )
+            return self._pixel_center( int( row ), int( col ), state.bounds ), False
         drow, dcol = subpixel_best_offset(
             state.objective_values,
             state.evaluated_mask,
@@ -341,11 +350,25 @@ class SmoothLifeSearch:
             maximize=self.config.maximize,
         )
         if drow == 0.0 and dcol == 0.0:
-            return self._pixel_center( int( row ), int( col ), state.bounds )
+            return self._pixel_center( int( row ), int( col ), state.bounds ), False
         height, width = self.config.grid_shape
         x = state.bounds[ 0, 0 ] + ( ( float( col ) + 0.5 + dcol ) / width ) * ( state.bounds[ 0, 1 ] - state.bounds[ 0, 0 ] )
         y = state.bounds[ 1, 0 ] + ( ( float( row ) + 0.5 + drow ) / height ) * ( state.bounds[ 1, 1 ] - state.bounds[ 1, 0 ] )
-        return np.asarray( [ x, y ], dtype=float )
+        return np.asarray( [ x, y ], dtype=float ), True
+
+    def _confirmation_budget_available( self ) -> bool:
+        state = self._require_state()
+        if self.active_max_evaluations is None:
+            return True
+        return int( state.evaluations ) < int( self.active_max_evaluations )
+
+    def _confirm_subpixel_candidate( self, candidate_point: np.ndarray ) -> float | None:
+        if not self._confirmation_budget_available():
+            return None
+        state = self._require_state()
+        value = float( self.objective( np.asarray( candidate_point, dtype=float ) ) )
+        state.evaluations += 1
+        return value
 
     def _evaluation_points( self, rows: np.ndarray, cols: np.ndarray, bounds: np.ndarray ) -> np.ndarray:
         return evaluation_points( rows, cols, bounds, self.config.grid_shape )
