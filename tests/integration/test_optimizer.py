@@ -1769,7 +1769,7 @@ class TestLateStagePatternSearch( unittest.TestCase ):
 
     def test_tuning_registers_late_stage_exploiter_family( self ) -> None:
         from smooth_life_search.benchmark.tuning import FAMILY_REGISTRY, _late_stage_exploiter_levels
-        from smooth_life_search.exploitation_study import DEFAULT_EXPLOITATION_FAMILIES
+        from smooth_life_search.benchmark.exploitation import DEFAULT_EXPLOITATION_FAMILIES
 
         self.assertIn( "late_stage_exploiter", FAMILY_REGISTRY )
         self.assertIn( "late_stage_exploiter", DEFAULT_EXPLOITATION_FAMILIES )
