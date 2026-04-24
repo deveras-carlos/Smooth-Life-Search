@@ -2105,7 +2105,7 @@ class TestVisualization( unittest.TestCase ):
 class TestCli( unittest.TestCase ):
     def test_module_entrypoint_executes_main( self ) -> None:
         result = subprocess.run(
-            [ sys.executable, "-m", "smooth_life_search.cli", "--help" ],
+            [ sys.executable, "-m", "smooth_life_search.input.cli", "--help" ],
             cwd=Path( __file__ ).resolve().parents[ 2 ],
             capture_output=True,
             text=True,
@@ -2117,7 +2117,7 @@ class TestCli( unittest.TestCase ):
 
     def test_single_command_can_trigger_gui_viewer( self ) -> None:
         stdout = StringIO()
-        with patch( "smooth_life_search.cli.open_run_viewer" ) as open_viewer:
+        with patch( "smooth_life_search.input.cli.open_run_viewer" ) as open_viewer:
             with redirect_stdout( stdout ):
                 exit_code = main.main(
                     [

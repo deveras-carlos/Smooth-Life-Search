@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import (
+from .. import (
     AGSLSConfig,
     AdaptiveGridSmoothLifeSearch,
     ExploitationStudySpec,
@@ -22,7 +22,7 @@ from . import (
     summarize_results,
     run_tuning_study,
 )
-from .benchmark import DEFAULT_BOUNDS, OBJECTIVES, ObjectiveFn
+from ..benchmark import DEFAULT_BOUNDS, OBJECTIVES, ObjectiveFn
 
 
 def _build_bounds(objective_name: str, dimension: int, lower: float | None, upper: float | None) -> list[tuple[float, float]]:

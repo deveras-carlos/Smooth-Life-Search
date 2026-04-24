@@ -12,7 +12,7 @@ license = {text = "CC0-1.0"}
 dependencies = ["numpy>=1.26", "pillow>=10.0"]
 
 [project.scripts]
-smooth-life-search = "smooth_life_search.cli:main"
+smooth-life-search = "smooth_life_search.input.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["smooth_life_search*"]
