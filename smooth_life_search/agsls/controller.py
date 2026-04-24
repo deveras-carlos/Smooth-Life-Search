@@ -31,7 +31,7 @@ from .diagnostics import (
     merge_summary,
 )
 from .geometry import centered_bounds, enforce_min_side_fraction, expand_bounds_to_min_widths, finalize_zoom_bounds, minimum_zoom_widths
-from .late_stage import MicrogridExploiter, PatternSearchExploiter, TranslationZoom
+from .late_stage import MicrogridExploiter, PatternSearchExploiter, PeriodicLocalSearch, TranslationZoom
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
 from .selection import eligible_basins, select_basin, should_choose_leader
@@ -284,7 +284,7 @@ class AdaptiveGridSmoothLifeSearch:
             if remaining is not None and remaining < self.engine.config.evaluations_per_step:
                 break
             self.engine.step( 1 )
-            self._maybe_run_periodic_local_search( box_id=box_id, late_stage_state=late_stage_state )
+            PeriodicLocalSearch( self ).maybe_run( box_id=box_id, late_stage_state=late_stage_state )
             state = self.engine.state
             if state is None:
                 raise RuntimeError( "engine state missing after step" )
