@@ -20,7 +20,13 @@ from ..core import (
 from .basins import detect_basins
 from .config import SmoothLifeConfig
 from .dynamics import exploration_score_field, initial_field, laplacian, refresh_dynamics_fields, vitality
-from .evaluation import blank_objective_cache, best_evaluated_flat_index, evaluation_points, normalized_objective_field
+from .evaluation import (
+    blank_objective_cache,
+    best_evaluated_flat_index,
+    evaluation_points,
+    normalized_objective_field,
+    subpixel_best_offset,
+)
 from .kernels import build_disk_kernel, build_ring_kernel
 from .presets import apply_preset
 from .remap import remap_field_to_bounds
@@ -267,6 +273,7 @@ class SmoothLifeSearch:
             state.objective_values,
             state.evaluated_mask,
             maximize=self.config.maximize,
+            gamma=self.config.objective_gamma,
         )
 
     def _update_best_records( self ) -> None:
@@ -279,8 +286,8 @@ class SmoothLifeSearch:
         if best_flat is None:
             return
         flat_values = state.objective_values.ravel()
-        candidate_point = self._flat_index_to_point( best_flat, state.bounds )
         candidate_value = float( flat_values[ best_flat ] )
+        candidate_point = self._subpixel_best_point( best_flat, state )
         state.box_best_point = candidate_point.copy()
         state.box_best_value = candidate_value
         if not np.isfinite( state.best_value ) or self._is_better( candidate_value, state.best_value ):
@@ -289,6 +296,24 @@ class SmoothLifeSearch:
         if not np.isfinite( state.local_best_value ) or self._is_better( candidate_value, state.local_best_value ):
             state.local_best_point = candidate_point.copy()
             state.local_best_value = candidate_value
+
+    def _subpixel_best_point( self, best_flat: int, state: SmoothLifeState ) -> np.ndarray:
+        row, col = np.unravel_index( int( best_flat ), self.config.grid_shape )
+        if not self.config.subpixel_best_point:
+            return self._pixel_center( int( row ), int( col ), state.bounds )
+        drow, dcol = subpixel_best_offset(
+            state.objective_values,
+            state.evaluated_mask,
+            int( row ),
+            int( col ),
+            maximize=self.config.maximize,
+        )
+        if drow == 0.0 and dcol == 0.0:
+            return self._pixel_center( int( row ), int( col ), state.bounds )
+        height, width = self.config.grid_shape
+        x = state.bounds[ 0, 0 ] + ( ( float( col ) + 0.5 + dcol ) / width ) * ( state.bounds[ 0, 1 ] - state.bounds[ 0, 0 ] )
+        y = state.bounds[ 1, 0 ] + ( ( float( row ) + 0.5 + drow ) / height ) * ( state.bounds[ 1, 1 ] - state.bounds[ 1, 0 ] )
+        return np.asarray( [ x, y ], dtype=float )
 
     def _evaluation_points( self, rows: np.ndarray, cols: np.ndarray, bounds: np.ndarray ) -> np.ndarray:
         return evaluation_points( rows, cols, bounds, self.config.grid_shape )

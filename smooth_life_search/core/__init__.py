@@ -11,6 +11,7 @@ from .scheduling import (
     FieldSchedule,
     RuntimeSignals,
     SchedulePolicy,
+    build_kernel_shrink_policy,
 )
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "ZOOM_BOUNDARY_FIELDS",
     "ZoomEvent",
     "bounds_area",
+    "build_kernel_shrink_policy",
     "normalize_bounds_2d",
     "point_in_bounds",
 ]

@@ -299,6 +299,58 @@ class SchedulePolicy:
         return policy
 
 
+def build_kernel_shrink_policy(
+    inner_radius: float,
+    outer_radius: float,
+    *,
+    end_scale: float = 0.6,
+    anti_alias_radius: float | None = None,
+) -> "SchedulePolicy":
+    """Return a ``SchedulePolicy`` that linearly shrinks the SmoothLife kernel radii over zoom progress.
+
+    At zoom_fraction=0 the radii keep their initial values; at zoom_fraction=1 they are
+    scaled by ``end_scale``. ``end_scale`` should be in ``(0, 1]``; values < 1 favour
+    exploitation by concentrating CA dynamics on fine-scale structure as the search
+    narrows. If ``anti_alias_radius`` is provided, it is shrunk on the same schedule.
+    """
+
+    if not 0.0 < end_scale <= 1.0:
+        raise ValueError("end_scale must be in (0, 1]")
+    if inner_radius <= 0.0 or outer_radius <= inner_radius:
+        raise ValueError("require 0 < inner_radius < outer_radius")
+    schedules: list[FieldSchedule] = [
+        FieldSchedule(
+            field_name="inner_radius",
+            mode="zoom_linear",
+            base_value=float(inner_radius),
+            low_value=float(inner_radius),
+            high_value=float(inner_radius) * float(end_scale),
+        ),
+        FieldSchedule(
+            field_name="outer_radius",
+            mode="zoom_linear",
+            base_value=float(outer_radius),
+            low_value=float(outer_radius),
+            high_value=float(outer_radius) * float(end_scale),
+        ),
+    ]
+    if anti_alias_radius is not None:
+        schedules.append(
+            FieldSchedule(
+                field_name="anti_alias_radius",
+                mode="zoom_linear",
+                base_value=float(anti_alias_radius),
+                low_value=float(anti_alias_radius),
+                high_value=max(0.5, float(anti_alias_radius) * float(end_scale)),
+            )
+        )
+    return SchedulePolicy(
+        schedules=tuple(schedules),
+        family="kernel_geometry",
+        schedule_kind="zoom_linear",
+    )
+
+
 __all__ = [
     "AGSLS_PER_DECISION_FIELDS",
     "FieldSchedule",
@@ -310,4 +362,5 @@ __all__ = [
     "ScheduleFieldStats",
     "SchedulePolicy",
     "ZOOM_BOUNDARY_FIELDS",
+    "build_kernel_shrink_policy",
 ]

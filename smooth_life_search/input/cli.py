@@ -13,9 +13,11 @@ from .. import (
     AGSLSConfig,
     AdaptiveGridSmoothLifeSearch,
     ExploitationStudySpec,
+    SchedulePolicy,
     SmoothLifeConfig,
     SmoothLifeSearch,
     StudySpec,
+    build_kernel_shrink_policy,
     open_run_viewer,
     run_exploitation_study,
     run_seeded_trials,
@@ -50,6 +52,7 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         dt=args.dt,
         diffusion=args.diffusion,
         objective_coupling=args.objective_coupling,
+        objective_gamma=getattr(args, "objective_gamma", 1.0),
         run_mode="simulation" if args.command == "simulate" else "search",
         preset=args.preset,
         maximize=args.maximize,
@@ -62,6 +65,18 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         max_evaluations=args.budget,
     )
     return bounds, smoothlife, agsls
+
+
+def _maybe_build_kernel_policy(args: argparse.Namespace, smoothlife: SmoothLifeConfig) -> SchedulePolicy | None:
+    if not getattr(args, "shrink_kernels", False):
+        return None
+    end_scale = float(getattr(args, "kernel_shrink_end_scale", 0.6))
+    return build_kernel_shrink_policy(
+        inner_radius=smoothlife.inner_radius,
+        outer_radius=smoothlife.outer_radius,
+        end_scale=end_scale,
+        anti_alias_radius=smoothlife.anti_alias_radius,
+    )
 
 
 def _objective_from_args(args: argparse.Namespace) -> ObjectiveFn:
@@ -134,7 +149,8 @@ def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
 def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
-    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls)
+    runtime_policy = _maybe_build_kernel_policy(args, smoothlife)
+    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls, runtime_policy=runtime_policy)
     controller.reset(seed=args.seed)
     run = controller.run(zoom_cycles=args.zoom_cycles, evaluations=args.budget)
     run.metadata.update({"mode": "agsls", "objective": args.objective})
@@ -159,7 +175,8 @@ def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
 def run_single(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
-    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls)
+    runtime_policy = _maybe_build_kernel_policy(args, smoothlife)
+    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls, runtime_policy=runtime_policy)
     controller.reset(seed=args.seed)
     result = controller.run(zoom_cycles=args.zoom_cycles, evaluations=args.budget)
     result.metadata.update({"mode": "single", "objective": args.objective})
@@ -424,6 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("--dt", type=float, default=0.25, help="SmoothLife time-step.")
     shared.add_argument("--diffusion", type=float, default=0.10, help="Diffusion strength.")
     shared.add_argument("--objective-coupling", type=float, default=0.30, help="How strongly the objective affects the transition function.")
+    shared.add_argument("--objective-gamma", type=float, default=1.0, help="Exponent applied to the normalized objective field. Values > 1 sharpen the support field toward the top of the distribution, favouring exploitation.")
     shared.add_argument("--preset", type=str, default="search", help="SmoothLife preset name.")
     shared.add_argument("--gif", type=str, default=None, help="Optional GIF output path.")
     shared.add_argument("--show", action="store_true", help="Open the animation in a Tk GUI viewer after the run completes.")
@@ -433,6 +451,8 @@ def build_parser() -> argparse.ArgumentParser:
     agsls_shared.add_argument("--steps-per-zoom", type=int, default=32, help="Initial SmoothLife steps per zoom cycle.")
     agsls_shared.add_argument("--min-steps-per-zoom", type=int, default=8, help="Minimum SmoothLife steps per zoom cycle.")
     agsls_shared.add_argument("--zoom-decay", type=float, default=0.75, help="Decay factor that makes zooms more frequent over time.")
+    agsls_shared.add_argument("--shrink-kernels", action="store_true", help="Linearly shrink SmoothLife kernel radii across zoom cycles for exploitation-favoured dynamics.")
+    agsls_shared.add_argument("--kernel-shrink-end-scale", type=float, default=0.6, help="End-of-run scale applied to inner/outer kernel radii when --shrink-kernels is set.")
 
     single = subparsers.add_parser("single", parents=[shared, agsls_shared], help="Run one AGSLS optimization job.")
     single.add_argument("--show-stages", action="store_true", help="Print per-zoom details.")

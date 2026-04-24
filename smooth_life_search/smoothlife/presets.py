@@ -54,6 +54,7 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         dt=config.dt,
         diffusion=config.diffusion,
         objective_coupling=config.objective_coupling,
+        objective_gamma=config.objective_gamma,
         field_floor=config.field_floor,
         field_ceiling=config.field_ceiling,
         initial_field_center=config.initial_field_center,
@@ -65,4 +66,5 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         maximize=config.maximize,
         preset=config.preset,
         store_all_snapshots=config.store_all_snapshots,
+        subpixel_best_point=config.subpixel_best_point,
     )
