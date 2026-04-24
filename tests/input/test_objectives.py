@@ -24,6 +24,21 @@ class TestObjectiveSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported objective kind"):
             resolve_objective({"kind": "csv_surface", "name": "surface"})
 
+    def test_resolves_python_callable_import_path(self) -> None:
+        objective = resolve_objective(
+            {
+                "kind": "import_path",
+                "import_path": "smooth_life_search.benchmark.functions:sphere",
+            }
+        )
+        self.assertEqual(objective(np.asarray([1.0, 2.0], dtype=float)), 5.0)
+
+    def test_invalid_import_path_raises_clear_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-empty import_path"):
+            resolve_objective({"kind": "import_path"})
+        with self.assertRaisesRegex(ValueError, "module:function"):
+            resolve_objective({"kind": "import_path", "import_path": "smooth_life_search.benchmark.functions.sphere"})
+
 
 if __name__ == "__main__":
     unittest.main()
