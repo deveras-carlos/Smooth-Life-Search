@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Callable
 
 import numpy as np
@@ -22,6 +21,7 @@ from ..core import (
 )
 from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.search import SmoothLifeSearch
+from .budget import bounded_evaluation_batch, effective_zoom_limit, max_evaluations_reached, remaining_evaluations
 from .config import AGSLSConfig
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
@@ -84,31 +84,19 @@ class AdaptiveGridSmoothLifeSearch:
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
-        limit = self.active_max_evaluations if self.active_max_evaluations is not None else self.agsls_config.max_evaluations
-        return limit is not None and state.evaluations >= limit
+        return max_evaluations_reached( state, self.agsls_config.max_evaluations, self.active_max_evaluations )
 
     def _remaining_evaluations( self ) -> int | None:
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
-        limit = self.active_max_evaluations if self.active_max_evaluations is not None else self.agsls_config.max_evaluations
-        if limit is None:
-            return None
-        return max( int( limit ) - int( state.evaluations ), 0 )
+        return remaining_evaluations( state, self.agsls_config.max_evaluations, self.active_max_evaluations )
 
     def _bounded_evaluation_batch( self, requested: int ) -> int:
-        remaining = self._remaining_evaluations()
-        if remaining is None:
-            return int( requested )
-        return max( 0, min( int( requested ), remaining ) )
+        return bounded_evaluation_batch( requested, self._remaining_evaluations() )
 
     def _effective_zoom_limit( self, eval_limit: int | None, configured_limit: int ) -> int:
-        baseline = self.agsls_config.zoom_cycles_budget_baseline
-        if eval_limit is None or baseline is None or baseline <= 0 or eval_limit < baseline:
-            return int( configured_limit )
-        ratio = float( eval_limit ) / float( baseline )
-        increment = int( math.floor( math.log2( ratio ) ) )
-        return int( configured_limit ) + max( 0, increment )
+        return effective_zoom_limit( eval_limit, configured_limit, self.agsls_config )
 
     @staticmethod
     def _bounds_area( bounds: np.ndarray ) -> float:
