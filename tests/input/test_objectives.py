@@ -40,6 +40,8 @@ class TestObjectiveSpec(unittest.TestCase):
             resolve_objective({"kind": "import_path"})
         with self.assertRaisesRegex(ValueError, "module:function"):
             resolve_objective({"kind": "import_path", "import_path": "smooth_life_search.benchmark.functions.sphere"})
+        with self.assertRaisesRegex(ValueError, "not callable"):
+            resolve_objective({"kind": "import_path", "import_path": "smooth_life_search.benchmark.registry:DEFAULT_BOUNDS"})
 
     def test_resolves_csv_surface_objective_with_bilinear_interpolation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -56,6 +58,11 @@ class TestObjectiveSpec(unittest.TestCase):
             self.assertEqual(objective(np.asarray([0.0, 0.0], dtype=float)), 0.0)
             self.assertEqual(objective(np.asarray([1.0, 1.0], dtype=float)), 30.0)
             self.assertEqual(objective(np.asarray([0.5, 0.5], dtype=float)), 15.0)
+
+            alias_objective = resolve_objective({"kind": "csv_surface", "path": str(path)})
+            self.assertEqual(alias_objective(np.asarray([0.25, 0.25], dtype=float)), 7.5)
+            with self.assertRaisesRegex(ValueError, "outside"):
+                objective(np.asarray([2.0, 0.0], dtype=float))
 
     def test_csv_surface_rejects_malformed_grids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
