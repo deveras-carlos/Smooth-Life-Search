@@ -25,7 +25,7 @@ from ..core import (
 from ..agsls.config import AGSLSConfig
 from ..agsls.controller import AdaptiveGridSmoothLifeSearch
 from ..smoothlife.config import SmoothLifeConfig
-from ..smoothlife.simulator import SmoothLifeSearch
+from ..smoothlife.search import SmoothLifeSearch
 from .artifacts import append_ndjson as _append_trial_record
 from .artifacts import load_ndjson as _load_trial_records
 from .artifacts import reset_artifacts, write_csv as _write_csv

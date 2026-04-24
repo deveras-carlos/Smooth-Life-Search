@@ -21,7 +21,7 @@ from ..core import (
     point_in_bounds,
 )
 from ..smoothlife.config import SmoothLifeConfig
-from ..smoothlife.simulator import SmoothLifeSearch
+from ..smoothlife.search import SmoothLifeSearch
 from .config import AGSLSConfig
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
