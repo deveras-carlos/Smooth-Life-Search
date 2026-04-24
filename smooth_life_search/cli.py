@@ -209,7 +209,7 @@ def _print_single(payload: dict[str, Any], show_stages: bool) -> None:
     print(f"seed: {payload['seed']}")
     print(f"budget: {payload['budget']}")
     print(f"evaluations: {payload['evaluations']}")
-    print(f"best value: {payload['best_value']:.8f}")
+    print(f"best value: {payload['best_value']:e}")
     print(f"best point: {payload['best_point']}")
     if show_stages:
         print("zoom events:")

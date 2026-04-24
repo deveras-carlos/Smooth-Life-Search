@@ -45,6 +45,27 @@ class AGSLSConfig:
     late_stage_eval_batch: int = 8
     late_stage_elite_k: int = 4
     late_stage_focus_radius_cells: int = 3
+    late_stage_microgrid_enabled: bool = False
+    late_stage_microgrid_resolution: int = 5
+    late_stage_microgrid_centers: int = 3
+    late_stage_microgrid_side_fraction: float = 0.25
+    late_stage_translation_enabled: bool = False
+    late_stage_translation_step_fraction: float = 0.25
+    late_stage_translation_min_offset_fraction: float = 0.10
+    late_stage_exploiter: str = "microgrid"
+    late_stage_periodic_local_search_enabled: bool = True
+    late_stage_periodic_local_search_interval_steps: int = 8
+    late_stage_periodic_local_search_initial_step_fraction: float = 0.10
+    late_stage_periodic_local_search_min_step_fraction: float = 0.005
+    late_stage_periodic_local_search_shrink: float = 0.5
+    late_stage_periodic_local_search_max_iterations: int = 12
+    late_stage_periodic_local_search_max_evaluations: int = 48
+    late_stage_pattern_search_initial_step_fraction: float = 0.15
+    late_stage_pattern_search_min_step_fraction: float = 0.005
+    late_stage_pattern_search_shrink: float = 0.5
+    late_stage_pattern_search_max_iterations: int = 12
+    late_stage_pattern_search_max_evaluations: int = 20
+    late_stage_pattern_search_reuse_tolerance_cells: float = 0.5
 
     def __post_init__(self) -> None:
         if self.max_zoom_cycles <= 0:
@@ -103,3 +124,39 @@ class AGSLSConfig:
             raise ValueError("late_stage_elite_k must be positive")
         if self.late_stage_focus_radius_cells <= 0:
             raise ValueError("late_stage_focus_radius_cells must be positive")
+        if self.late_stage_microgrid_resolution <= 0:
+            raise ValueError("late_stage_microgrid_resolution must be positive")
+        if self.late_stage_microgrid_centers <= 0:
+            raise ValueError("late_stage_microgrid_centers must be positive")
+        if not 0.0 < self.late_stage_microgrid_side_fraction <= 1.0:
+            raise ValueError("late_stage_microgrid_side_fraction must be in (0, 1]")
+        if not 0.0 < self.late_stage_translation_step_fraction <= 1.0:
+            raise ValueError("late_stage_translation_step_fraction must be in (0, 1]")
+        if not 0.0 < self.late_stage_translation_min_offset_fraction <= 1.0:
+            raise ValueError("late_stage_translation_min_offset_fraction must be in (0, 1]")
+        if self.late_stage_exploiter not in ("microgrid", "pattern_search", "none"):
+            raise ValueError("late_stage_exploiter must be one of 'microgrid', 'pattern_search', 'none'")
+        if self.late_stage_periodic_local_search_interval_steps <= 0:
+            raise ValueError("late_stage_periodic_local_search_interval_steps must be positive")
+        if not 0.0 < self.late_stage_periodic_local_search_initial_step_fraction <= 1.0:
+            raise ValueError("late_stage_periodic_local_search_initial_step_fraction must be in (0, 1]")
+        if not 0.0 < self.late_stage_periodic_local_search_min_step_fraction <= self.late_stage_periodic_local_search_initial_step_fraction:
+            raise ValueError("late_stage_periodic_local_search_min_step_fraction must be in (0, initial_step_fraction]")
+        if not 0.0 < self.late_stage_periodic_local_search_shrink < 1.0:
+            raise ValueError("late_stage_periodic_local_search_shrink must be in (0, 1)")
+        if self.late_stage_periodic_local_search_max_iterations <= 0:
+            raise ValueError("late_stage_periodic_local_search_max_iterations must be positive")
+        if self.late_stage_periodic_local_search_max_evaluations <= 0:
+            raise ValueError("late_stage_periodic_local_search_max_evaluations must be positive")
+        if not 0.0 < self.late_stage_pattern_search_initial_step_fraction <= 1.0:
+            raise ValueError("late_stage_pattern_search_initial_step_fraction must be in (0, 1]")
+        if not 0.0 < self.late_stage_pattern_search_min_step_fraction <= self.late_stage_pattern_search_initial_step_fraction:
+            raise ValueError("late_stage_pattern_search_min_step_fraction must be in (0, initial_step_fraction]")
+        if not 0.0 < self.late_stage_pattern_search_shrink < 1.0:
+            raise ValueError("late_stage_pattern_search_shrink must be in (0, 1)")
+        if self.late_stage_pattern_search_max_iterations <= 0:
+            raise ValueError("late_stage_pattern_search_max_iterations must be positive")
+        if self.late_stage_pattern_search_max_evaluations <= 0:
+            raise ValueError("late_stage_pattern_search_max_evaluations must be positive")
+        if not 0.0 <= self.late_stage_pattern_search_reuse_tolerance_cells <= 1.0:
+            raise ValueError("late_stage_pattern_search_reuse_tolerance_cells must be in [0, 1]")

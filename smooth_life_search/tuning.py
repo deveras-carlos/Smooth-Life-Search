@@ -357,6 +357,85 @@ def _agsls_cadence_levels(_smoothlife: SmoothLifeConfig, _agsls: AGSLSConfig) ->
     return tuple({"initial_steps_per_zoom": value} for value in (48, 40, 32, 24, 16))
 
 
+def _late_stage_microgrid_levels(_smoothlife: SmoothLifeConfig, agsls: AGSLSConfig) -> tuple[dict[str, Any], ...]:
+    return (
+        {
+            "late_stage_microgrid_enabled": False,
+            "late_stage_microgrid_centers": agsls.late_stage_microgrid_centers,
+            "late_stage_microgrid_side_fraction": agsls.late_stage_microgrid_side_fraction,
+        },
+        {
+            "late_stage_microgrid_enabled": True,
+            "late_stage_microgrid_centers": 2,
+            "late_stage_microgrid_side_fraction": 0.20,
+        },
+        {
+            "late_stage_microgrid_enabled": True,
+            "late_stage_microgrid_centers": 3,
+            "late_stage_microgrid_side_fraction": 0.25,
+        },
+        {
+            "late_stage_microgrid_enabled": True,
+            "late_stage_microgrid_centers": 4,
+            "late_stage_microgrid_side_fraction": 0.35,
+        },
+    )
+
+
+def _late_stage_exploiter_levels(_smoothlife: SmoothLifeConfig, agsls: AGSLSConfig) -> tuple[dict[str, Any], ...]:
+    return (
+        {"late_stage_exploiter": "none"},
+        {
+            "late_stage_exploiter": "microgrid",
+            "late_stage_microgrid_enabled": True,
+            "late_stage_microgrid_resolution": agsls.late_stage_microgrid_resolution,
+            "late_stage_microgrid_centers": agsls.late_stage_microgrid_centers,
+            "late_stage_microgrid_side_fraction": agsls.late_stage_microgrid_side_fraction,
+        },
+        {
+            "late_stage_exploiter": "pattern_search",
+            "late_stage_pattern_search_initial_step_fraction": agsls.late_stage_pattern_search_initial_step_fraction,
+            "late_stage_pattern_search_min_step_fraction": agsls.late_stage_pattern_search_min_step_fraction,
+            "late_stage_pattern_search_shrink": agsls.late_stage_pattern_search_shrink,
+            "late_stage_pattern_search_max_iterations": agsls.late_stage_pattern_search_max_iterations,
+            "late_stage_pattern_search_max_evaluations": agsls.late_stage_pattern_search_max_evaluations,
+        },
+        {
+            "late_stage_exploiter": "pattern_search",
+            "late_stage_pattern_search_initial_step_fraction": 0.08,
+            "late_stage_pattern_search_min_step_fraction": 0.002,
+            "late_stage_pattern_search_shrink": 0.5,
+            "late_stage_pattern_search_max_iterations": 18,
+            "late_stage_pattern_search_max_evaluations": 30,
+        },
+    )
+
+
+def _late_stage_translation_levels(_smoothlife: SmoothLifeConfig, _agsls: AGSLSConfig) -> tuple[dict[str, Any], ...]:
+    return (
+        {
+            "late_stage_translation_enabled": False,
+            "late_stage_translation_step_fraction": 0.25,
+            "late_stage_translation_min_offset_fraction": 0.10,
+        },
+        {
+            "late_stage_translation_enabled": True,
+            "late_stage_translation_step_fraction": 0.15,
+            "late_stage_translation_min_offset_fraction": 0.20,
+        },
+        {
+            "late_stage_translation_enabled": True,
+            "late_stage_translation_step_fraction": 0.25,
+            "late_stage_translation_min_offset_fraction": 0.12,
+        },
+        {
+            "late_stage_translation_enabled": True,
+            "late_stage_translation_step_fraction": 0.35,
+            "late_stage_translation_min_offset_fraction": 0.08,
+        },
+    )
+
+
 FAMILY_DEFINITIONS: tuple[ParameterFamilyDefinition, ...] = (
     ParameterFamilyDefinition(
         "transition_window",
@@ -517,6 +596,30 @@ FAMILY_DEFINITIONS: tuple[ParameterFamilyDefinition, ...] = (
         ("agsls",),
         ("zoom_linear", "budget_sigmoid", "plateau_reactive", "late_stage_reactive"),
         _agsls_cadence_levels,
+    ),
+    ParameterFamilyDefinition(
+        "late_stage_microgrid",
+        ("agsls",),
+        "static_only",
+        (),
+        (),
+        _late_stage_microgrid_levels,
+    ),
+    ParameterFamilyDefinition(
+        "late_stage_translation",
+        ("agsls",),
+        "static_only",
+        (),
+        (),
+        _late_stage_translation_levels,
+    ),
+    ParameterFamilyDefinition(
+        "late_stage_exploiter",
+        ("agsls",),
+        "static_only",
+        (),
+        (),
+        _late_stage_exploiter_levels,
     ),
 )
 

@@ -58,7 +58,7 @@ def _tiny_spec(output_dir: Path, workers: int, *, resume: bool = True) -> StudyS
         workers=workers,
         resume=resume,
         keep_snapshots_in_finalists=False,
-        parameter_families=("transition_window", "diffusion", "objective_guidance", "basin_quantile"),
+        parameter_families=("transition_window", "diffusion", "objective_guidance", "basin_quantile", "late_stage_microgrid", "late_stage_translation"),
         profile="test",
         preflight=False,
     )
@@ -173,10 +173,16 @@ class TestRuntimePolicies(unittest.TestCase):
         registry = tuning_module.FAMILY_REGISTRY
         self.assertIn("smoothlife_cadence", registry)
         self.assertIn("agsls_cadence", registry)
+        self.assertIn("late_stage_microgrid", registry)
+        self.assertIn("late_stage_translation", registry)
         self.assertEqual(registry["smoothlife_cadence"].family_scope, "sls_per_step")
         self.assertEqual(registry["agsls_cadence"].family_scope, "agsls_decision")
+        self.assertEqual(registry["late_stage_microgrid"].family_scope, "static_only")
+        self.assertEqual(registry["late_stage_translation"].family_scope, "static_only")
         self.assertEqual(registry["smoothlife_cadence"].applicable_variants, ("agsls",))
         self.assertEqual(registry["agsls_cadence"].applicable_variants, ("agsls",))
+        self.assertEqual(registry["late_stage_microgrid"].applicable_variants, ("agsls",))
+        self.assertEqual(registry["late_stage_translation"].applicable_variants, ("agsls",))
         self.assertIn("late_stage_reactive", registry["smoothlife_cadence"].schedule_kinds)
         self.assertIn("late_stage_reactive", registry["agsls_cadence"].schedule_kinds)
 
@@ -252,6 +258,8 @@ class TestTuningStudy(unittest.TestCase):
             manifest = _json_file(summary.family_manifest_path)
             self.assertEqual(set(manifest["smoothlife"]), set(SmoothLifeConfig.__dataclass_fields__))
             self.assertEqual(set(manifest["agsls"]), set(AGSLSConfig.__dataclass_fields__))
+            self.assertIn("late_stage_microgrid", manifest["families"])
+            self.assertIn("late_stage_translation", manifest["families"])
             for group_name in ("smoothlife", "agsls"):
                 for payload in manifest[group_name].values():
                     self.assertIn("scope", payload)
