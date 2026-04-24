@@ -36,6 +36,25 @@ PRESET_BUILDERS: dict[str, SmoothLifeConfig] = {
         objective_coupling=0.30,
         run_mode="search",
     ),
+    "search_exploit": SmoothLifeConfig(
+        birth_low=0.278,
+        birth_high=0.365,
+        death_low=0.267,
+        death_high=0.445,
+        alpha_n=0.028,
+        alpha_m=0.147,
+        inner_radius=7.0,
+        outer_radius=21.0,
+        dt=0.25,
+        diffusion=0.10,
+        objective_coupling=0.30,
+        objective_gamma=1.0,
+        support_ema_alpha=0.30,
+        subpixel_best_point=True,
+        subpixel_confirm=True,
+        exploitation_score_late_stage=True,
+        run_mode="search",
+    ),
 }
 
 
@@ -47,7 +66,8 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
     if config.preset not in PRESET_BUILDERS:
         raise ValueError(f"unknown SmoothLife preset: {config.preset}")
     preset = PRESET_BUILDERS[config.preset]
-    return replace(
+    defaults = SmoothLifeConfig()
+    resolved = replace(
         preset,
         grid_shape=config.grid_shape,
         anti_alias_radius=config.anti_alias_radius,
@@ -55,7 +75,6 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         diffusion=config.diffusion,
         objective_coupling=config.objective_coupling,
         objective_gamma=config.objective_gamma,
-        support_ema_alpha=config.support_ema_alpha,
         field_floor=config.field_floor,
         field_ceiling=config.field_ceiling,
         initial_field_center=config.initial_field_center,
@@ -68,6 +87,22 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         preset=config.preset,
         store_all_snapshots=config.store_all_snapshots,
         subpixel_best_point=config.subpixel_best_point,
-        subpixel_confirm=config.subpixel_confirm,
-        exploitation_score_late_stage=config.exploitation_score_late_stage,
     )
+    if config.preset == "search_exploit":
+        if config.support_ema_alpha == defaults.support_ema_alpha:
+            resolved.support_ema_alpha = preset.support_ema_alpha
+        else:
+            resolved.support_ema_alpha = config.support_ema_alpha
+        if config.subpixel_confirm == defaults.subpixel_confirm:
+            resolved.subpixel_confirm = preset.subpixel_confirm
+        else:
+            resolved.subpixel_confirm = config.subpixel_confirm
+        if config.exploitation_score_late_stage == defaults.exploitation_score_late_stage:
+            resolved.exploitation_score_late_stage = preset.exploitation_score_late_stage
+        else:
+            resolved.exploitation_score_late_stage = config.exploitation_score_late_stage
+    else:
+        resolved.support_ema_alpha = config.support_ema_alpha
+        resolved.subpixel_confirm = config.subpixel_confirm
+        resolved.exploitation_score_late_stage = config.exploitation_score_late_stage
+    return resolved

@@ -83,6 +83,8 @@ def _maybe_build_kernel_policy(args: argparse.Namespace, smoothlife: SmoothLifeC
 
 def _maybe_build_gamma_policy(args: argparse.Namespace) -> SchedulePolicy | None:
     gamma_end = getattr(args, "gamma_ramp", None)
+    if gamma_end is None and getattr(args, "preset", None) == "search_exploit":
+        gamma_end = 1.25
     if gamma_end is None:
         return None
     activation = float(getattr(args, "gamma_ramp_activation", 0.6))
