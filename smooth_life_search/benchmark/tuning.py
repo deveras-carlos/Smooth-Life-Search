@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 from dataclasses import asdict, dataclass, field, replace
 import itertools
 import json
@@ -27,6 +26,9 @@ from ..agsls.config import AGSLSConfig
 from ..agsls.controller import AdaptiveGridSmoothLifeSearch
 from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.simulator import SmoothLifeSearch
+from .artifacts import append_ndjson as _append_trial_record
+from .artifacts import load_ndjson as _load_trial_records
+from .artifacts import reset_artifacts, write_csv as _write_csv
 from .registry import DEFAULT_BOUNDS, OBJECTIVES
 from .runner import _success_mask
 
@@ -1309,25 +1311,6 @@ def _execute_trial(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_trial_records(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-    return records
-
-
-def _append_trial_record(path: Path, record: dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True))
-        handle.write("\n")
-
-
 def _run_trials(
     spec: StudySpec,
     trials_path: Path,
@@ -1357,14 +1340,6 @@ def _run_trials(
             completed_keys.add(str(record["trial_key"]))
             completed += 1
     return completed, skipped
-
-
-def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({field: row.get(field) for field in fieldnames})
 
 
 def _parameter_effect_rows(stats: list[dict[str, Any]], overall_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1848,26 +1823,22 @@ def _artifact_paths(summary: StudySummary) -> dict[str, Path]:
 
 
 def _prepare_output_dir(spec: StudySpec) -> Path:
-    output_dir = Path(spec.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if spec.resume:
-        return output_dir
-    for filename in (
-        "trials.ndjson",
-        "per_objective_leaderboard.csv",
-        "overall_rank.csv",
-        "parameter_effects.csv",
-        "adaptive_required.csv",
-        "adaptive_paired_effects.csv",
-        "runtime_efficiency.csv",
-        "family_manifest.json",
-        "finalists.json",
-        "report.md",
-    ):
-        path = output_dir / filename
-        if path.exists():
-            path.unlink()
-    return output_dir
+    return reset_artifacts(
+        spec.output_dir,
+        (
+            "trials.ndjson",
+            "per_objective_leaderboard.csv",
+            "overall_rank.csv",
+            "parameter_effects.csv",
+            "adaptive_required.csv",
+            "adaptive_paired_effects.csv",
+            "runtime_efficiency.csv",
+            "family_manifest.json",
+            "finalists.json",
+            "report.md",
+        ),
+        resume=spec.resume,
+    )
 
 
 def _run_preflight(spec: StudySpec) -> None:
