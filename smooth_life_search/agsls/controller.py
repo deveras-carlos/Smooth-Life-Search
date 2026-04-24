@@ -31,6 +31,7 @@ from .diagnostics import (
     merge_summary,
 )
 from .geometry import centered_bounds, enforce_min_side_fraction, expand_bounds_to_min_widths, finalize_zoom_bounds, minimum_zoom_widths
+from .late_stage import MicrogridExploiter
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
 from .selection import eligible_basins, select_basin, should_choose_leader
@@ -1057,7 +1058,7 @@ class AdaptiveGridSmoothLifeSearch:
         if exploiter == "pattern_search":
             return "pattern_search", self._run_late_stage_pattern_search( basin, current_bounds )
         if exploiter == "microgrid":
-            return "microgrid", self._run_late_stage_microgrid( basin, current_bounds )
+            return "microgrid", MicrogridExploiter( self ).run( basin, current_bounds )
         return "none", None
 
     def _should_intensify(
