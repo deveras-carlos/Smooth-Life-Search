@@ -23,6 +23,13 @@ from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.search import SmoothLifeSearch
 from .budget import bounded_evaluation_batch, effective_zoom_limit, max_evaluations_reached, remaining_evaluations
 from .config import AGSLSConfig
+from .diagnostics import (
+    empty_microgrid_summary,
+    empty_pattern_search_summary,
+    empty_periodic_local_search_summary,
+    empty_translation_summary,
+    merge_summary,
+)
 from .geometry import centered_bounds, enforce_min_side_fraction, expand_bounds_to_min_widths, finalize_zoom_bounds, minimum_zoom_widths
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
@@ -145,75 +152,28 @@ class AdaptiveGridSmoothLifeSearch:
 
     @staticmethod
     def _empty_microgrid_summary() -> dict[ str, object ]:
-        return {
-            "microgrid_ran": False,
-            "microgrid_candidate_centers": [ ],
-            "microgrid_sample_count_total": 0,
-            "microgrid_sample_count_per_center": 0,
-            "microgrid_winning_center_kind": "",
-            "microgrid_winning_point": [ ],
-            "microgrid_winning_value": None,
-            "microgrid_refined_bounds": [ ],
-        }
+        return empty_microgrid_summary()
 
     def _microgrid_summary_payload( self, summary: dict[ str, object ] | None ) -> dict[ str, object ]:
-        payload = self._empty_microgrid_summary()
-        if summary is not None:
-            payload.update( summary )
-        return payload
+        return merge_summary( self._empty_microgrid_summary(), summary )
 
     @staticmethod
     def _empty_translation_summary() -> dict[ str, object ]:
-        return {
-            "translation_ran": False,
-            "translation_trigger_reason": "",
-            "translation_target_kind": "",
-            "translation_source_point": [ ],
-            "translation_target_point": [ ],
-            "translation_applied_vector": [ ],
-            "translation_refined_bounds": [ ],
-        }
+        return empty_translation_summary()
 
     def _translation_summary_payload( self, summary: dict[ str, object ] | None ) -> dict[ str, object ]:
-        payload = self._empty_translation_summary()
-        if summary is not None:
-            payload.update( summary )
-        return payload
+        return merge_summary( self._empty_translation_summary(), summary )
 
     @staticmethod
     def _empty_pattern_search_summary() -> dict[ str, object ]:
-        return {
-            "pattern_search_ran": False,
-            "pattern_search_seed_kind": "",
-            "pattern_search_iterations": 0,
-            "pattern_search_evaluations_spent": 0,
-            "pattern_search_evaluations_reused": 0,
-            "pattern_search_final_step": [ ],
-            "pattern_search_final_point": [ ],
-            "pattern_search_final_value": None,
-            "pattern_search_refined_bounds": [ ],
-            "pattern_search_improved": False,
-        }
+        return empty_pattern_search_summary()
 
     def _pattern_search_summary_payload( self, summary: dict[ str, object ] | None ) -> dict[ str, object ]:
-        payload = self._empty_pattern_search_summary()
-        if summary is not None:
-            payload.update( summary )
-        return payload
+        return merge_summary( self._empty_pattern_search_summary(), summary )
 
     @staticmethod
     def _empty_periodic_local_search_summary() -> dict[ str, object ]:
-        return {
-            "periodic_local_search_ran": False,
-            "periodic_local_search_runs": 0,
-            "periodic_local_search_total_evaluations_spent": 0,
-            "periodic_local_search_last_step_index": None,
-            "periodic_local_search_last_seed_count": 0,
-            "periodic_local_search_last_best_point": [ ],
-            "periodic_local_search_last_best_value": None,
-            "periodic_local_search_last_improved": False,
-            "periodic_local_search_last_evaluations_spent": 0,
-        }
+        return empty_periodic_local_search_summary()
 
     def _periodic_local_search_summary_payload(
         self,
@@ -224,9 +184,7 @@ class AdaptiveGridSmoothLifeSearch:
         payload = self._empty_periodic_local_search_summary()
         if box_id is not None:
             payload.update( self._periodic_local_search_summaries.get( int( box_id ), {} ) )
-        if summary is not None:
-            payload.update( summary )
-        return payload
+        return merge_summary( payload, summary )
 
     def _late_stage_summary_payload(
         self,
