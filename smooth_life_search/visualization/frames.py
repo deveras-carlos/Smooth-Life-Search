@@ -9,6 +9,8 @@ import numpy as np
 from ..core import SearchRun, SmoothLifeSnapshot
 from .overlays import draw_bbox, draw_point_marker, draw_world_path, world_to_image_xy
 from .palettes import palette_table
+from .panels import convergence_panel as build_convergence_panel
+from .panels import support_field
 
 _PANEL_GAP = 16
 _PANEL_MARGIN = 18
@@ -88,116 +90,13 @@ def _panel_title( draw: ImageDraw.ImageDraw, box: tuple[ int, int, int, int ], t
 
 
 def _support_field( snapshot: SmoothLifeSnapshot ) -> np.ndarray:
-    return np.clip( 1.0 - np.abs( snapshot.field ), 0.0, 1.0 ) * snapshot.objective_field
+    return support_field( snapshot )
 
 
 def _local_best_history_points( run: SearchRun | None, frame_index: int ) -> list[ np.ndarray ]:
     if run is None:
         return [ ]
     return [ previous.local_best_point.copy() for previous in run.snapshots[ : frame_index + 1 ] ]
-
-
-def _plot_transform( values: np.ndarray ) -> np.ndarray:
-    if np.all( values >= 0.0 ):
-        return np.log1p( values )
-    return np.sign( values ) * np.log1p( np.abs( values ) )
-
-
-def _convergence_panel( run: SearchRun | None, frame_index: int, panel_size: tuple[ int, int ] ) -> Image.Image:
-    panel_width, panel_height = panel_size
-    image = Image.new( "RGB", panel_size, _PANEL_BACKGROUND )
-    draw = ImageDraw.Draw( image )
-    left = max( 8, int( round( panel_width * 0.16 ) ) )
-    top = 14
-    right = max( left + 8, panel_width - 12 )
-    bottom = max( top + 8, panel_height - 24 )
-    draw.rectangle( ( left, top, right, bottom ), outline=_PANEL_BORDER, width=1 )
-
-    if run is None or not run.snapshots:
-        draw.text( ( 16, 16 ), "no run history", fill=_TEXT_PRIMARY )
-        return image
-
-    x_values = np.asarray(
-        [ snapshot.metadata.get( "evaluations", snapshot.step_index ) for snapshot in run.snapshots ],
-        dtype=float,
-    )
-    x_label = "evaluations"
-    if len( np.unique( x_values ) ) <= 2:
-        x_values = np.asarray( [ snapshot.step_index for snapshot in run.snapshots ], dtype=float )
-        x_label = "step"
-    global_values = np.asarray( [ snapshot.best_value for snapshot in run.snapshots ], dtype=float )
-    local_values = np.asarray( [ snapshot.local_best_value for snapshot in run.snapshots ], dtype=float )
-    box_values = np.asarray( [ snapshot.box_best_value for snapshot in run.snapshots ], dtype=float )
-    transformed_global = _plot_transform( global_values )
-    transformed_local = _plot_transform( local_values )
-    transformed_box = _plot_transform( box_values )
-    x_min = float( np.min( x_values ) )
-    x_max = float( np.max( x_values ) )
-    if abs( x_max - x_min ) < 1e-12:
-        x_max = x_min + 1.0
-    transformed_all = np.concatenate( [ transformed_global, transformed_local, transformed_box ] )
-    y_min = float( np.min( transformed_all ) )
-    y_max = float( np.max( transformed_all ) )
-    if abs( y_max - y_min ) < 1e-12:
-        y_max = y_min + 1.0
-
-    for step in range( 5 ):
-        frac = step / 4.0
-        x = left + frac * ( right - left )
-        y = top + frac * ( bottom - top )
-        draw.line( ( x, top, x, bottom ), fill=( 38, 44, 57 ), width=1 )
-        draw.line( ( left, y, right, y ), fill=( 38, 44, 57 ), width=1 )
-
-    def build_line( series: np.ndarray ) -> list[ tuple[ float, float ] ]:
-        points: list[ tuple[ float, float ] ] = [ ]
-        for x_value, y_value in zip( x_values, series ):
-            x = left + ( x_value - x_min ) / ( x_max - x_min ) * ( right - left )
-            y = bottom - ( y_value - y_min ) / ( y_max - y_min ) * ( bottom - top )
-            points.append( ( float( x ), float( y ) ) )
-        return points
-
-    global_line = build_line( transformed_global )
-    local_line = build_line( transformed_local )
-    box_line = build_line( transformed_box )
-    if len( global_line ) >= 2:
-        draw.line( global_line, fill=_GLOBAL_COLOR, width=3 )
-    if len( local_line ) >= 2:
-        draw.line( local_line, fill=_LOCAL_COLOR, width=2 )
-    if len( box_line ) >= 2:
-        draw.line( box_line, fill=_BOX_COLOR, width=2 )
-
-    current = max( 0, min( frame_index, len( global_line ) - 1 ) )
-    for point, color, radius in (
-        ( global_line[ current ], _GLOBAL_COLOR, 4 ),
-        ( local_line[ current ], _LOCAL_COLOR, 3 ),
-        ( box_line[ current ], _BOX_COLOR, 3 ),
-    ):
-        x_value, y_value = point
-        draw.ellipse(
-            ( x_value - radius, y_value - radius, x_value + radius, y_value + radius ),
-            fill=color,
-            outline=( 10, 10, 10 ),
-        )
-
-    for index, snapshot in enumerate( run.snapshots ):
-        if index > frame_index:
-            continue
-        decision = str( snapshot.metadata.get( "zoom_decision", "" ) )
-        if not decision:
-            continue
-        x_value = x_values[ index ]
-        x = left + ( x_value - x_min ) / ( x_max - x_min ) * ( right - left )
-        color = _ZOOM_BOX if decision == "accepted" else _DEFERRED
-        draw.line( ( x, top, x, bottom ), fill=color, width=1 )
-
-    draw.text( ( left, panel_height - 20 ), x_label, fill=_TEXT_SECONDARY )
-    draw.text( ( 10, 8 ), "best value", fill=_TEXT_SECONDARY )
-    draw.text(
-        ( left, top + 4 ),
-        "global / local / box",
-        fill=_TEXT_PRIMARY,
-    )
-    return image
 
 
 def _footer_text( snapshot: SmoothLifeSnapshot, frame_index: int ) -> str:
@@ -292,7 +191,7 @@ def snapshot_to_image(
         radius=5,
     )
 
-    convergence_panel = _convergence_panel( run, resolved_index, field_panel.size )
+    convergence_panel = build_convergence_panel( run, resolved_index, field_panel.size )
 
     panel_size = field_panel.size
     canvas_width = _PANEL_MARGIN * 2 + panel_size[ 0 ] * 3 + _PANEL_GAP * 2
