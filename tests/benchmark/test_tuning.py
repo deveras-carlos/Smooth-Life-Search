@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-import smooth_life_search.tuning as tuning_module
+import smooth_life_search.benchmark.tuning as tuning_module
 from smooth_life_search import (
     AGSLSConfig,
     AdaptiveGridSmoothLifeSearch,

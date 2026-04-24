@@ -8,7 +8,7 @@ from .exploitation_study import ExploitationStudySpec, ExploitationStudySummary,
 from .benchmark import DEFAULT_BOUNDS, OBJECTIVES
 from .core import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
 from .smoothlife import SmoothLifeConfig, SmoothLifeSearch
-from .tuning import StudySpec, StudySummary, run_tuning_study
+from .benchmark.tuning import StudySpec, StudySummary, run_tuning_study
 from .visualization import open_run_viewer, render_run_frames, save_run_animation, snapshot_to_image
 
 __all__ = [

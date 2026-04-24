@@ -1768,7 +1768,7 @@ class TestLateStagePatternSearch( unittest.TestCase ):
                     self.assertEqual( bool( summary.get( "pattern_search_ran", False ) ), expected_pattern )
 
     def test_tuning_registers_late_stage_exploiter_family( self ) -> None:
-        from smooth_life_search.tuning import FAMILY_REGISTRY, _late_stage_exploiter_levels
+        from smooth_life_search.benchmark.tuning import FAMILY_REGISTRY, _late_stage_exploiter_levels
         from smooth_life_search.exploitation_study import DEFAULT_EXPLOITATION_FAMILIES
 
         self.assertIn( "late_stage_exploiter", FAMILY_REGISTRY )

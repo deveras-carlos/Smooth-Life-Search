@@ -16,19 +16,19 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
-from .core import (
+from ..core import (
     AGSLS_PER_DECISION_FIELDS,
     FieldSchedule,
     SMOOTHLIFE_PER_STEP_FIELDS,
     SchedulePolicy,
     ZOOM_BOUNDARY_FIELDS,
 )
-from .agsls.config import AGSLSConfig
-from .agsls.controller import AdaptiveGridSmoothLifeSearch
-from .benchmark.runner import _success_mask
-from .benchmark import DEFAULT_BOUNDS, OBJECTIVES
-from .smoothlife.config import SmoothLifeConfig
-from .smoothlife.simulator import SmoothLifeSearch
+from ..agsls.config import AGSLSConfig
+from ..agsls.controller import AdaptiveGridSmoothLifeSearch
+from ..smoothlife.config import SmoothLifeConfig
+from ..smoothlife.simulator import SmoothLifeSearch
+from .registry import DEFAULT_BOUNDS, OBJECTIVES
+from .runner import _success_mask
 
 
 DEFAULT_TUNING_OBJECTIVES = ("sphere", "ackley", "rastrigin", "griewank", "rosenbrock", "himmelblau")
