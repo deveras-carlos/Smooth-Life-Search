@@ -19,12 +19,12 @@ from ..core import (
 )
 from .basins import detect_basins
 from .config import SmoothLifeConfig
+from .dynamics import exploration_score_field, initial_field, laplacian, refresh_dynamics_fields, vitality
 from .evaluation import blank_objective_cache, best_evaluated_flat_index, evaluation_points, normalized_objective_field
-from .kernels import build_disk_kernel, build_ring_kernel, periodic_convolve2d
+from .kernels import build_disk_kernel, build_ring_kernel
 from .presets import apply_preset
 from .remap import remap_field_to_bounds
 from .state import SmoothLifeState
-from .transition import smoothlife_transition
 
 Objective = Callable[[ np.ndarray ], float]
 
@@ -75,20 +75,7 @@ class SmoothLifeSearch:
         return candidate_value <= incumbent_value + 1e-12
 
     def _initial_field( self ) -> np.ndarray:
-        height, width = self.config.grid_shape
-        field = self.config.initial_field_center + self.rng.uniform( -0.75, 0.75, size=( height, width ) )
-        rows = np.linspace( -1.0, 1.0, height, dtype=float )[ :, None ]
-        cols = np.linspace( -1.0, 1.0, width, dtype=float )[ None, : ]
-        field += 0.20 * np.sin( 3.0 * np.pi * rows ) * np.cos( 2.0 * np.pi * cols )
-        field += self.rng.normal( scale=self.config.initial_field_noise, size=( height, width ) )
-        center_row = height // 2
-        center_col = width // 2
-        row0 = max( 0, center_row - 8 )
-        row1 = min( height, center_row + 8 )
-        col0 = max( 0, center_col - 8 )
-        col1 = min( width, center_col + 8 )
-        field[ row0:row1, col0:col1 ] *= 0.25
-        return np.clip( field, self.config.field_floor, self.config.field_ceiling )
+        return initial_field( self.config, self.rng )
 
     def _blank_objective_cache( self ) -> tuple[ np.ndarray, np.ndarray, np.ndarray ]:
         return blank_objective_cache( self.config.grid_shape )
@@ -194,7 +181,7 @@ class SmoothLifeSearch:
 
     @staticmethod
     def vitality( field: np.ndarray ) -> np.ndarray:
-        return np.clip( 1.0 - np.abs( np.asarray( field, dtype=float ) ), 0.0, 1.0 )
+        return vitality( field )
 
     def alive_mask( self, threshold: float ) -> np.ndarray:
         state = self._require_state()
@@ -263,18 +250,15 @@ class SmoothLifeSearch:
 
     def _refresh_dynamics_fields( self ) -> None:
         state = self._require_state()
-        vitality = self.vitality( state.field )
-        inner_fill = periodic_convolve2d( vitality, self.inner_kernel )
-        outer_fill = periodic_convolve2d( vitality, self.outer_kernel )
-        transition, _target_vitality = smoothlife_transition(
+        inner_fill, outer_fill, transition = refresh_dynamics_fields(
             state.field,
-            inner_fill,
-            outer_fill,
-            self.config,
             state.objective_field,
+            self.config,
+            self.inner_kernel,
+            self.outer_kernel,
         )
-        state.inner_fill = np.clip( inner_fill, 0.0, 1.0 )
-        state.outer_fill = np.clip( outer_fill, 0.0, 1.0 )
+        state.inner_fill = inner_fill
+        state.outer_fill = outer_fill
         state.transition_field = transition
 
     def _refresh_objective_field( self ) -> None:
@@ -364,9 +348,7 @@ class SmoothLifeSearch:
 
     def exploration_score_field( self ) -> np.ndarray:
         state = self._require_state()
-        vitality = self.vitality( state.field )
-        transition_interest = np.clip( 1.0 - np.abs( state.transition_field ), 0.0, 1.0 )
-        return 0.5 * vitality + 0.5 * transition_interest
+        return exploration_score_field( state.field, state.transition_field )
 
     def explore_top_pixels( self, limit: int, mask: np.ndarray | None = None, score_field: np.ndarray | None = None ) -> int:
         """Evaluate the highest-scoring unexplored pixels, optionally within a mask."""
@@ -379,13 +361,7 @@ class SmoothLifeSearch:
         return self.explore_top_pixels( self.config.evaluations_per_step, score_field=self.vitality( self._require_state().field ) )
 
     def _laplacian( self, field: np.ndarray ) -> np.ndarray:
-        neighbor_sum = (
-            np.roll( field, 1, axis=0 )
-            + np.roll( field, -1, axis=0 )
-            + np.roll( field, 1, axis=1 )
-            + np.roll( field, -1, axis=1 )
-        )
-        return 0.25 * neighbor_sum - field
+        return laplacian( field )
 
     def _capture_snapshot( self, force: bool = False, selected_basin_bbox: np.ndarray | None = None ) -> None:
         if not self.config.store_all_snapshots and not force:
