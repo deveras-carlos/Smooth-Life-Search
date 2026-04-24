@@ -9,7 +9,7 @@ from .benchmark import DEFAULT_BOUNDS, OBJECTIVES
 from .core import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
 from .smoothlife import SmoothLifeConfig, SmoothLifeSearch
 from .benchmark.tuning import StudySpec, StudySummary, run_tuning_study
-from .visualization import open_run_viewer, render_run_frames, save_run_animation, snapshot_to_image
+from .visualization import RenderOptions, open_run_viewer, render_run_frames, save_run_animation, snapshot_to_image
 
 __all__ = [
     "DEFAULT_BOUNDS",
@@ -22,6 +22,7 @@ __all__ = [
     "Basin",
     "BenchmarkSummary",
     "RuntimeSignals",
+    "RenderOptions",
     "SearchResult",
     "SchedulePolicy",
     "SearchRun",

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from PIL import Image, ImageDraw, ImageFont
 
 import numpy as np
 
 from ..core import SearchRun, SmoothLifeSnapshot
 from .overlays import draw_bbox, draw_point_marker, draw_world_path, world_to_image_xy
+from .palettes import palette_table
 
 _PANEL_GAP = 16
 _PANEL_MARGIN = 18
@@ -28,36 +27,6 @@ _PATH_COLOR = ( 255, 255, 255 )
 _ZOOM_BOX = ( 255, 104, 92 )
 _DEFERRED = ( 160, 160, 160 )
 _UNEXPLORED = ( 30, 34, 40 )
-
-_PALETTES: dict[ str, tuple[ tuple[ int, int, int ], ... ] ] = {
-    "signed": (
-        ( 9, 23, 57 ),
-        ( 55, 94, 151 ),
-        ( 208, 224, 246 ),
-        ( 246, 212, 168 ),
-        ( 176, 79, 44 ),
-    ),
-    "objective": (
-        ( 12, 9, 32 ),
-        ( 71, 18, 99 ),
-        ( 164, 44, 122 ),
-        ( 239, 115, 62 ),
-        ( 252, 232, 126 ),
-    ),
-    "support": (
-        ( 5, 11, 24 ),
-        ( 29, 59, 96 ),
-        ( 84, 141, 154 ),
-        ( 217, 179, 95 ),
-        ( 255, 240, 182 ),
-    ),
-    "vitality": (
-        ( 7, 18, 26 ),
-        ( 26, 88, 83 ),
-        ( 88, 171, 145 ),
-        ( 205, 239, 198 ),
-    ),
-}
 
 
 def _normalize_to_unit( values: np.ndarray ) -> np.ndarray:
@@ -80,23 +49,10 @@ def _normalize_signed( values: np.ndarray ) -> np.ndarray:
     return np.clip( normalized, 0.0, 1.0 )
 
 
-@lru_cache( maxsize=None )
-def _palette_table( name: str ) -> np.ndarray:
-    stops = _PALETTES[ name ]
-    positions = np.linspace( 0.0, 1.0, len( stops ) )
-    ramp = np.linspace( 0.0, 1.0, 256 )
-    palette = np.empty( ( 256, 3 ), dtype=np.uint8 )
-    for channel in range( 3 ):
-        palette[ :, channel ] = np.round(
-            np.interp( ramp, positions, [ color[ channel ] for color in stops ] )
-        ).astype( np.uint8 )
-    return palette
-
-
 def _palette_image( values: np.ndarray, name: str, *, signed: bool = False ) -> Image.Image:
     normalized = _normalize_signed( values ) if signed else _normalize_to_unit( values )
     indices = np.round( normalized * 255.0 ).astype( np.uint8 )
-    rgb = _palette_table( name )[ indices ]
+    rgb = palette_table( name )[ indices ]
     return Image.fromarray( rgb, mode="RGB" )
 
 
