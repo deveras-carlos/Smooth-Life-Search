@@ -21,6 +21,7 @@ from smooth_life_search import (
     ackley,
     render_run_frames,
     save_run_animation,
+    RenderOptions,
     sphere,
 )
 from smooth_life_search.agsls.scoring import score_basins
@@ -2100,6 +2101,15 @@ class TestVisualization( unittest.TestCase ):
         self.assertEqual( len( frames ), len( run.snapshots ) )
         self.assertGreater( frames[ 0 ].size[ 0 ], 64 )
         self.assertGreater( frames[ 0 ].size[ 1 ], 64 )
+
+    def test_render_options_drive_frame_export(self) -> None:
+        config = SmoothLifeConfig( grid_shape=( 32, 32 ), evaluations_per_step=4, snapshot_interval=1, preset="search" )
+        search = SmoothLifeSearch( sphere, bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ], config=config )
+        search.reset( seed=19 )
+        run = search.run( steps=2 )
+        default_frame = render_run_frames( run, options=RenderOptions( scale=1 ) )[ 0 ]
+        larger_frame = render_run_frames( run, options=RenderOptions( scale=2 ) )[ 0 ]
+        self.assertGreater( larger_frame.size[ 0 ], default_frame.size[ 0 ] )
 
 
 class TestCli( unittest.TestCase ):

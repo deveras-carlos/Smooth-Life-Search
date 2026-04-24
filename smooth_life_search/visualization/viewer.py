@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 
 from ..core import SearchRun, SmoothLifeSnapshot
 from .frames import snapshot_to_image
+from .options import RenderOptions
 
 
 def _viewer_title( run: SearchRun, base_title: str ) -> str:
@@ -50,13 +51,14 @@ def _snapshot_summary(
     )
 
 
-def render_run_frames( run: SearchRun, scale: int = 2 ) -> list[ Image.Image ]:
+def render_run_frames( run: SearchRun, scale: int = 2, *, options: RenderOptions | None = None ) -> list[ Image.Image ]:
     """Render all snapshots in a run into dashboard frames."""
 
     if not run.snapshots:
         raise ValueError( "run must contain at least one snapshot" )
+    resolved = options or RenderOptions( scale=scale )
     return [
-        snapshot_to_image( snapshot, scale=scale, run=run, frame_index=index )
+        snapshot_to_image( snapshot, scale=resolved.scale, run=run, frame_index=index )
         for index, snapshot in enumerate( run.snapshots )
     ]
 
@@ -66,11 +68,13 @@ def open_run_viewer(
     *,
     scale: int = 2,
     duration_ms: int = 90,
+    options: RenderOptions | None = None,
     title: str = "SmoothLife Animation",
 ) -> None:
     """Open a GUI window that plays a SearchRun animation."""
 
-    frames = render_run_frames( run, scale=scale )
+    resolved = options or RenderOptions( scale=scale, duration_ms=duration_ms )
+    frames = render_run_frames( run, options=resolved )
     snapshots = run.snapshots
 
     try:
@@ -84,7 +88,7 @@ def open_run_viewer(
         "index": 0,
         "playing": True,
         "after_id": None,
-        "duration_ms": max( 10, int( duration_ms ) ),
+        "duration_ms": max( 10, int( resolved.duration_ms ) ),
         "photo": None,
     }
 
