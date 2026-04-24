@@ -2206,6 +2206,29 @@ class TestCli( unittest.TestCase ):
         self.assertIn( "objective: sphere", output )
         self.assertIn( "steps:", output )
 
+    def test_cli_config_file_provides_defaults_but_flags_override( self ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path( tmpdir ) / "run.json"
+            config_path.write_text(
+                '{"objective": "sphere", "dimension": 2, "seed": 11, "grid_height": 16, "grid_width": 16}',
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+            with redirect_stdout( stdout ):
+                exit_code = main.main(
+                    [
+                        "--config",
+                        str( config_path ),
+                        "simulate",
+                        "--seed",
+                        "3",
+                        "--steps",
+                        "1",
+                    ]
+                )
+        self.assertEqual( exit_code, 0 )
+        self.assertIn( "seed: 3", stdout.getvalue() )
+
     def test_benchmark_command_runs( self ) -> None:
         stdout = StringIO()
         with redirect_stdout( stdout ):

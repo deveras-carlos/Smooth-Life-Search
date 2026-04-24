@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,12 @@ from .. import (
     run_tuning_study,
 )
 from ..benchmark import DEFAULT_BOUNDS, OBJECTIVES, ObjectiveFn
+from .config import load_config_file
 
 
-def _build_bounds(objective_name: str, dimension: int, lower: float | None, upper: float | None) -> list[tuple[float, float]]:
+def _build_bounds(objective_name: str | None, dimension: int, lower: float | None, upper: float | None) -> list[tuple[float, float]]:
+    if objective_name is None:
+        raise ValueError("objective is required")
     if dimension != 2:
         raise ValueError("this implementation currently supports only 2D problems")
     if objective_name == "himmelblau" and dimension != 2:
@@ -58,6 +62,12 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         max_evaluations=args.budget,
     )
     return bounds, smoothlife, agsls
+
+
+def _objective_from_args(args: argparse.Namespace) -> ObjectiveFn:
+    if args.objective is None:
+        raise ValueError("objective is required")
+    return OBJECTIVES[args.objective]
 
 
 def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
@@ -100,7 +110,7 @@ def _maybe_show_animation(run: Any, show: bool, title: str) -> None:
 
 
 def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
-    objective = OBJECTIVES[args.objective]
+    objective = _objective_from_args(args)
     bounds, smoothlife, _ = _build_configs(args)
     engine = SmoothLifeSearch(objective, bounds, smoothlife)
     engine.reset(seed=args.seed)
@@ -122,7 +132,7 @@ def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
-    objective = OBJECTIVES[args.objective]
+    objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
     controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls)
     controller.reset(seed=args.seed)
@@ -147,7 +157,7 @@ def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_single(args: argparse.Namespace) -> dict[str, Any]:
-    objective = OBJECTIVES[args.objective]
+    objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
     controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls)
     controller.reset(seed=args.seed)
@@ -172,7 +182,7 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    objective = OBJECTIVES[args.objective]
+    objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
     seeds = list(range(args.seed_start, args.seed_start + args.trials))
 
@@ -398,10 +408,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run SmoothLife simulation and Adaptive Grid Smooth Life Search jobs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--config", type=str, default=None, help="Optional JSON/TOML file providing parser defaults.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     shared = argparse.ArgumentParser(add_help=False)
-    shared.add_argument("--objective", choices=sorted(OBJECTIVES), required=True, help="Benchmark objective to optimize.")
+    shared.add_argument("--objective", choices=sorted(OBJECTIVES), default=None, help="Benchmark objective to optimize.")
     shared.add_argument("--dimension", type=int, default=2, help="Problem dimension. Only 2D is currently supported.")
     shared.add_argument("--budget", type=int, default=None, help="Objective evaluation budget for AGSLS.")
     shared.add_argument("--lower", type=float, default=None, help="Lower bound for every coordinate.")
@@ -491,8 +502,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=str, default=None)
+    config_args, _remaining = config_parser.parse_known_args(raw_argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
+    if config_args.config is not None:
+        explicit_dests = {
+            token[2:].replace("-", "_")
+            for token in raw_argv
+            if token.startswith("--") and token != "--config"
+        }
+        for key, value in load_config_file(config_args.config).items():
+            if key not in explicit_dests:
+                setattr(args, key, value)
     try:
         if args.command == "single":
             payload = run_single(args)
