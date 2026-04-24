@@ -11,7 +11,9 @@ Smooth-Life-Search is a small Python package for two related 2D algorithms:
 - Objective-aware transition dynamics where the optimization landscape is part of the update rule.
 - Adaptive basin detection and full-grid zooming through `AGSLS`.
 - GIF animation export for the whole search trajectory.
-- Benchmark helpers for repeated seeded runs and aggregate summaries.
+- A `benchmark` package for objective functions, repeated seeded runs, tuning studies, exploitation studies, and artifact/report IO.
+- An `input` package for CLI parsing, JSON/TOML config loading, Python-callable objective loading, and CSV sampled-surface objectives.
+- A `core` package for shared models, bounds helpers, objective protocols, and runtime scheduling.
 
 ## Install
 
@@ -30,6 +32,14 @@ smooth-life-search --help
 ## Run From The CLI
 
 You can run either the installed CLI or `python3 main.py`.
+
+All commands accept a top-level config file:
+
+```bash
+smooth-life-search --config run.toml simulate --steps 40
+```
+
+Config values are used as defaults; explicit CLI flags override them.
 
 AGSLS optimization run:
 
@@ -79,6 +89,28 @@ print(run.best_value)
 print(run.best_point)
 ```
 
+Package-level modules are organized by responsibility:
+
+- `smooth_life_search.smoothlife`: literal SmoothLife search engine.
+- `smooth_life_search.agsls`: adaptive grid SmoothLife search.
+- `smooth_life_search.benchmark`: objective registry, seeded trials, tuning, exploitation studies, artifacts, reports.
+- `smooth_life_search.visualization`: frame rendering, GIF export, and Tk viewer.
+- `smooth_life_search.input`: CLI/config/objective ingestion.
+- `smooth_life_search.core`: shared dataclasses, protocols, bounds, and scheduling.
+
+Built-in and external objectives can be resolved through the input layer:
+
+```python
+from smooth_life_search.input import ObjectiveSpec, resolve_objective
+
+objective = resolve_objective(ObjectiveSpec.builtin("ackley"))
+external = resolve_objective({
+    "kind": "import_path",
+    "import_path": "my_package.objectives:custom_objective",
+})
+surface = resolve_objective({"kind": "csv_surface", "csv_path": "surface.csv"})
+```
+
 ## Tests
 
 ```bash
@@ -90,4 +122,4 @@ python -m unittest discover -s tests -v
 - The current implementation is intentionally **2D only**.
 - For maximization, set `maximize=True` in `SmoothLifeConfig`.
 - The project now exposes the class-based APIs directly rather than the old compatibility wrappers.
-- The public API lives in `smooth_life_search/__init__.py`.
+- The convenience public API lives in `smooth_life_search/__init__.py`; subsystem APIs live in their package `__init__.py` files.
