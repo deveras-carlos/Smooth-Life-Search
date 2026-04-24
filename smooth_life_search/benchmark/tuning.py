@@ -23,7 +23,7 @@ from ..core import (
     ZOOM_BOUNDARY_FIELDS,
 )
 from ..agsls.config import AGSLSConfig
-from ..agsls.controller import AdaptiveGridSmoothLifeSearch
+from ..agsls.search import AdaptiveGridSmoothLifeSearch
 from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.search import SmoothLifeSearch
 from .artifacts import append_ndjson as _append_trial_record
