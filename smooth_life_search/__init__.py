@@ -1,6 +1,6 @@
 """SmoothLife Search and Adaptive Grid Smooth Life Search for 2D optimization."""
 
-from .adaptive import FieldSchedule, RuntimeSignals, SchedulePolicy
+from .core import FieldSchedule, RuntimeSignals, SchedulePolicy
 from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
 from .benchmarking import BenchmarkSummary, run_seeded_trials, summarize_results
 from .benchmarks import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere

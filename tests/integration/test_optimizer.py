@@ -322,7 +322,7 @@ class TestAGSLS( unittest.TestCase ):
         global_improvement: float = 1.0,
         stage_improvement: float = 1.0,
     ):
-        from smooth_life_search.adaptive import RuntimeSignals
+        from smooth_life_search.core import RuntimeSignals
 
         return RuntimeSignals(
             step_index=0,

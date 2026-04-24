@@ -6,8 +6,17 @@ from typing import Callable
 
 import numpy as np
 
-from ..adaptive import KERNEL_PARAMETER_FIELDS, RuntimeSignals, SMOOTHLIFE_PER_STEP_FIELDS, SchedulePolicy, ZOOM_BOUNDARY_FIELDS
-from ..core import Basin, SearchRun, SmoothLifeSnapshot, normalize_bounds_2d
+from ..core import (
+    KERNEL_PARAMETER_FIELDS,
+    SMOOTHLIFE_PER_STEP_FIELDS,
+    ZOOM_BOUNDARY_FIELDS,
+    Basin,
+    RuntimeSignals,
+    SchedulePolicy,
+    SearchRun,
+    SmoothLifeSnapshot,
+    normalize_bounds_2d,
+)
 from .basins import detect_basins
 from .config import SmoothLifeConfig
 from .kernels import build_disk_kernel, build_ring_kernel, periodic_convolve2d

@@ -16,7 +16,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
-from .adaptive import (
+from .core import (
     AGSLS_PER_DECISION_FIELDS,
     FieldSchedule,
     SMOOTHLIFE_PER_STEP_FIELDS,
