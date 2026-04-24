@@ -31,7 +31,7 @@ from .diagnostics import (
     merge_summary,
 )
 from .geometry import centered_bounds, enforce_min_side_fraction, expand_bounds_to_min_widths, finalize_zoom_bounds, minimum_zoom_widths
-from .late_stage import MicrogridExploiter
+from .late_stage import MicrogridExploiter, TranslationZoom
 from .scheduling import steps_for_zoom_cycle
 from .scoring import score_basins
 from .selection import eligible_basins, select_basin, should_choose_leader
@@ -1422,7 +1422,7 @@ class AdaptiveGridSmoothLifeSearch:
         )
         translation_accepted = False
         if should_intensify:
-            translation_result = self._run_late_stage_translation(
+            translation_result = TranslationZoom( self ).run(
                 selected,
                 old_bounds,
                 new_bounds,
