@@ -2,8 +2,8 @@
 
 from .core import FieldSchedule, RuntimeSignals, SchedulePolicy
 from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
-from .benchmarking import BenchmarkSummary, run_seeded_trials, summarize_results
 from .benchmark import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
+from .benchmark import BenchmarkSummary, run_seeded_trials, summarize_results
 from .exploitation_study import ExploitationStudySpec, ExploitationStudySummary, run_exploitation_study
 from .benchmark import DEFAULT_BOUNDS, OBJECTIVES
 from .core import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent

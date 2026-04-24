@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 
-from .core import SearchResult, SearchRunner
+from ..core import SearchResult, SearchRunner
 
 
 @dataclass(slots=True)
