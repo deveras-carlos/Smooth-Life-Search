@@ -2106,7 +2106,7 @@ class TestCli( unittest.TestCase ):
     def test_module_entrypoint_executes_main( self ) -> None:
         result = subprocess.run(
             [ sys.executable, "-m", "smooth_life_search.cli", "--help" ],
-            cwd=Path( __file__ ).resolve().parents[ 1 ],
+            cwd=Path( __file__ ).resolve().parents[ 2 ],
             capture_output=True,
             text=True,
             check=False,
