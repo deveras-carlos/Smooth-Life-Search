@@ -245,6 +245,8 @@ class SmoothLifeSearch:
         if rebuild_kernels and any( field_name in KERNEL_PARAMETER_FIELDS for field_name in changed ):
             self._rebuild_kernels()
         if self.state is not None:
+            if "objective_gamma" in changed:
+                self._refresh_objective_field()
             self._refresh_dynamics_fields()
         return changed
 

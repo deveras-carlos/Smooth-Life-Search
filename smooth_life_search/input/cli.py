@@ -17,7 +17,9 @@ from .. import (
     SmoothLifeConfig,
     SmoothLifeSearch,
     StudySpec,
+    build_gamma_ramp_policy,
     build_kernel_shrink_policy,
+    combine_schedule_policies,
     open_run_viewer,
     run_exploitation_study,
     run_seeded_trials,
@@ -76,6 +78,21 @@ def _maybe_build_kernel_policy(args: argparse.Namespace, smoothlife: SmoothLifeC
         outer_radius=smoothlife.outer_radius,
         end_scale=end_scale,
         anti_alias_radius=smoothlife.anti_alias_radius,
+    )
+
+
+def _maybe_build_gamma_policy(args: argparse.Namespace) -> SchedulePolicy | None:
+    gamma_end = getattr(args, "gamma_ramp", None)
+    if gamma_end is None:
+        return None
+    activation = float(getattr(args, "gamma_ramp_activation", 0.6))
+    return build_gamma_ramp_policy(end=float(gamma_end), activation_zoom_fraction=activation)
+
+
+def _runtime_policy_from_args(args: argparse.Namespace, smoothlife: SmoothLifeConfig) -> SchedulePolicy | None:
+    return combine_schedule_policies(
+        _maybe_build_gamma_policy(args),
+        _maybe_build_kernel_policy(args, smoothlife),
     )
 
 
@@ -149,7 +166,7 @@ def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
 def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
-    runtime_policy = _maybe_build_kernel_policy(args, smoothlife)
+    runtime_policy = _runtime_policy_from_args(args, smoothlife)
     controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls, runtime_policy=runtime_policy)
     controller.reset(seed=args.seed)
     run = controller.run(zoom_cycles=args.zoom_cycles, evaluations=args.budget)
@@ -175,7 +192,7 @@ def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
 def run_single(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
-    runtime_policy = _maybe_build_kernel_policy(args, smoothlife)
+    runtime_policy = _runtime_policy_from_args(args, smoothlife)
     controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls, runtime_policy=runtime_policy)
     controller.reset(seed=args.seed)
     result = controller.run(zoom_cycles=args.zoom_cycles, evaluations=args.budget)
@@ -453,6 +470,8 @@ def build_parser() -> argparse.ArgumentParser:
     agsls_shared.add_argument("--zoom-decay", type=float, default=0.75, help="Decay factor that makes zooms more frequent over time.")
     agsls_shared.add_argument("--shrink-kernels", action="store_true", help="Linearly shrink SmoothLife kernel radii across zoom cycles for exploitation-favoured dynamics.")
     agsls_shared.add_argument("--kernel-shrink-end-scale", type=float, default=0.6, help="End-of-run scale applied to inner/outer kernel radii when --shrink-kernels is set.")
+    agsls_shared.add_argument("--gamma-ramp", type=float, default=None, metavar="END", help="Ramp SmoothLife objective_gamma from 1.0 to END over late zoom progress.")
+    agsls_shared.add_argument("--gamma-ramp-activation", type=float, default=0.6, help="Zoom fraction where --gamma-ramp begins.")
 
     single = subparsers.add_parser("single", parents=[shared, agsls_shared], help="Run one AGSLS optimization job.")
     single.add_argument("--show-stages", action="store_true", help="Print per-zoom details.")

@@ -1,6 +1,13 @@
 """SmoothLife Search and Adaptive Grid Smooth Life Search for 2D optimization."""
 
-from .core import FieldSchedule, RuntimeSignals, SchedulePolicy, build_kernel_shrink_policy
+from .core import (
+    FieldSchedule,
+    RuntimeSignals,
+    SchedulePolicy,
+    build_gamma_ramp_policy,
+    build_kernel_shrink_policy,
+    combine_schedule_policies,
+)
 from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
 from .benchmark import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
 from .benchmark import BenchmarkSummary, run_seeded_trials, summarize_results
@@ -33,7 +40,9 @@ __all__ = [
     "StudySummary",
     "ZoomEvent",
     "ackley",
+    "build_gamma_ramp_policy",
     "build_kernel_shrink_policy",
+    "combine_schedule_policies",
     "griewank",
     "himmelblau",
     "open_run_viewer",

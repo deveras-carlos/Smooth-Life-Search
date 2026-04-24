@@ -12,6 +12,7 @@ SMOOTHLIFE_PER_STEP_FIELDS = frozenset(
         "dt",
         "diffusion",
         "objective_coupling",
+        "objective_gamma",
         "evaluations_per_step",
     }
 )
@@ -191,10 +192,13 @@ class FieldSchedule:
     high_value: Any | None = None
     plateau_threshold: float = 1e-6
     zoom_fraction_threshold: float = 0.6
+    activation_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         if self.mode not in SCHEDULE_MODES:
             raise ValueError(f"unknown schedule mode: {self.mode}")
+        if not 0.0 <= self.activation_fraction < 1.0:
+            raise ValueError("activation_fraction must be in [0, 1)")
 
     def evaluate(self, signals: RuntimeSignals) -> Any:
         if self.mode == "constant":
@@ -203,6 +207,11 @@ class FieldSchedule:
             start = self.base_value if self.low_value is None else self.low_value
             end = self.high_value if self.high_value is not None else self.base_value
             fraction = signals.zoom_fraction()
+            if self.activation_fraction > 0.0:
+                if fraction <= self.activation_fraction:
+                    fraction = 0.0
+                else:
+                    fraction = (fraction - self.activation_fraction) / (1.0 - self.activation_fraction)
             return _coerce_like(self.base_value, float(start) + (float(end) - float(start)) * fraction)
         if self.mode == "budget_sigmoid":
             start = self.base_value if self.low_value is None else self.low_value
@@ -351,6 +360,61 @@ def build_kernel_shrink_policy(
     )
 
 
+def build_gamma_ramp_policy(
+    *,
+    start: float = 1.0,
+    end: float = 1.25,
+    activation_zoom_fraction: float = 0.6,
+) -> "SchedulePolicy":
+    """Return a delayed zoom-linear objective-gamma ramp policy."""
+
+    if not 0.0 < start <= 3.0:
+        raise ValueError("start must be in (0, 3]")
+    if not 0.0 < end <= 3.0:
+        raise ValueError("end must be in (0, 3]")
+    if end < start:
+        raise ValueError("end must be greater than or equal to start")
+    if not 0.0 <= activation_zoom_fraction < 1.0:
+        raise ValueError("activation_zoom_fraction must be in [0, 1)")
+    return SchedulePolicy(
+        schedules=(
+            FieldSchedule(
+                field_name="objective_gamma",
+                mode="zoom_linear",
+                base_value=float(start),
+                low_value=float(start),
+                high_value=float(end),
+                activation_fraction=float(activation_zoom_fraction),
+            ),
+        ),
+        family="objective_gamma",
+        schedule_kind="guarded_zoom_linear",
+    )
+
+
+def combine_schedule_policies(*policies: "SchedulePolicy | None") -> "SchedulePolicy | None":
+    """Merge policy schedules while preserving their existing field order."""
+
+    schedules: list[FieldSchedule] = []
+    families: list[str] = []
+    kinds: list[str] = []
+    for policy in policies:
+        if policy is None:
+            continue
+        schedules.extend(policy.schedules)
+        if policy.family:
+            families.append(policy.family)
+        if policy.schedule_kind:
+            kinds.append(policy.schedule_kind)
+    if not schedules:
+        return None
+    return SchedulePolicy(
+        schedules=tuple(schedules),
+        family="+".join(families) if families else None,
+        schedule_kind="+".join(kinds) if kinds else "combined",
+    )
+
+
 __all__ = [
     "AGSLS_PER_DECISION_FIELDS",
     "FieldSchedule",
@@ -362,5 +426,7 @@ __all__ = [
     "ScheduleFieldStats",
     "SchedulePolicy",
     "ZOOM_BOUNDARY_FIELDS",
+    "build_gamma_ramp_policy",
     "build_kernel_shrink_policy",
+    "combine_schedule_policies",
 ]
