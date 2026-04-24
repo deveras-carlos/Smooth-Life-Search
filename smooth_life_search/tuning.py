@@ -26,7 +26,7 @@ from .core import (
 from .agsls.config import AGSLSConfig
 from .agsls.controller import AdaptiveGridSmoothLifeSearch
 from .benchmarking import _success_mask
-from .objectives import DEFAULT_BOUNDS, OBJECTIVES
+from .benchmark import DEFAULT_BOUNDS, OBJECTIVES
 from .smoothlife.config import SmoothLifeConfig
 from .smoothlife.simulator import SmoothLifeSearch
 

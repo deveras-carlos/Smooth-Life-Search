@@ -6,7 +6,7 @@ from typing import Callable
 
 import numpy as np
 
-from .benchmark import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
+from .functions import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
 
 ObjectiveFn = Callable[[np.ndarray], float]
 

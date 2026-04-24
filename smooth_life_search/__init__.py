@@ -5,7 +5,7 @@ from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
 from .benchmarking import BenchmarkSummary, run_seeded_trials, summarize_results
 from .benchmark import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
 from .exploitation_study import ExploitationStudySpec, ExploitationStudySummary, run_exploitation_study
-from .objectives import DEFAULT_BOUNDS, OBJECTIVES
+from .benchmark import DEFAULT_BOUNDS, OBJECTIVES
 from .core import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
 from .smoothlife import SmoothLifeConfig, SmoothLifeSearch
 from .tuning import StudySpec, StudySummary, run_tuning_study
