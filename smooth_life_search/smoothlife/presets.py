@@ -68,4 +68,5 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         preset=config.preset,
         store_all_snapshots=config.store_all_snapshots,
         subpixel_best_point=config.subpixel_best_point,
+        exploitation_score_late_stage=config.exploitation_score_late_stage,
     )

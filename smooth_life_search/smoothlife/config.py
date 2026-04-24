@@ -41,6 +41,7 @@ class SmoothLifeConfig:
     preset: str | None = None
     store_all_snapshots: bool = True
     subpixel_best_point: bool = True
+    exploitation_score_late_stage: bool = False
 
     def __post_init__(self) -> None:
         if len(self.grid_shape) != 2:

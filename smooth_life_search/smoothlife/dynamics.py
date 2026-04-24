@@ -73,3 +73,41 @@ def exploration_score_field(field: np.ndarray, transition_field: np.ndarray) -> 
 
     transition_interest = np.clip(1.0 - np.abs(transition_field), 0.0, 1.0)
     return 0.5 * vitality(field) + 0.5 * transition_interest
+
+
+def _four_neighbor_boundary(mask: np.ndarray) -> np.ndarray:
+    up = np.roll(mask, 1, axis=0)
+    down = np.roll(mask, -1, axis=0)
+    left = np.roll(mask, 1, axis=1)
+    right = np.roll(mask, -1, axis=1)
+    dilated = mask | up | down | left | right
+    eroded = mask & up & down & left & right
+    return dilated & ~eroded
+
+
+def exploitation_score_field(
+    field: np.ndarray,
+    transition_field: np.ndarray,
+    objective_field: np.ndarray,
+    evaluated_mask: np.ndarray,
+) -> np.ndarray:
+    """Score late-stage pixels by support uncertainty and basin boundaries."""
+
+    objective = np.asarray(objective_field, dtype=float)
+    if not np.any(evaluated_mask) or float(np.nanmax(objective) - np.nanmin(objective)) <= 1e-12:
+        return exploration_score_field(field, transition_field)
+
+    live = vitality(field)
+    support = live * np.clip(objective, 0.0, 1.0)
+    uncertainty = np.clip(1.0 - np.abs(objective - 0.5) * 2.0, 0.0, 1.0)
+    finite_support = support[np.isfinite(support)]
+    if finite_support.size == 0:
+        return exploration_score_field(field, transition_field)
+
+    threshold = float(np.quantile(finite_support, 0.75))
+    high_support = support >= threshold
+    if not np.any(high_support) or np.all(high_support):
+        boundary_bonus = np.zeros_like(support, dtype=float)
+    else:
+        boundary_bonus = _four_neighbor_boundary(high_support).astype(float)
+    return np.clip(uncertainty * support + 0.25 * boundary_bonus, 0.0, 1.25)

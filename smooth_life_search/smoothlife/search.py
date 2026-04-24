@@ -19,7 +19,14 @@ from ..core import (
 )
 from .basins import detect_basins
 from .config import SmoothLifeConfig
-from .dynamics import exploration_score_field, initial_field, laplacian, refresh_dynamics_fields, vitality
+from .dynamics import (
+    exploitation_score_field,
+    exploration_score_field,
+    initial_field,
+    laplacian,
+    refresh_dynamics_fields,
+    vitality,
+)
 from .evaluation import (
     blank_objective_cache,
     best_evaluated_flat_index,
@@ -400,6 +407,15 @@ class SmoothLifeSearch:
     def exploration_score_field( self ) -> np.ndarray:
         state = self._require_state()
         return exploration_score_field( state.field, state.transition_field )
+
+    def exploitation_score_field( self ) -> np.ndarray:
+        state = self._require_state()
+        return exploitation_score_field(
+            state.field,
+            state.transition_field,
+            state.objective_field,
+            state.evaluated_mask,
+        )
 
     def explore_top_pixels( self, limit: int, mask: np.ndarray | None = None, score_field: np.ndarray | None = None ) -> int:
         """Evaluate the highest-scoring unexplored pixels, optionally within a mask."""

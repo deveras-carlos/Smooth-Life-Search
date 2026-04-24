@@ -473,7 +473,10 @@ class AdaptiveGridSmoothLifeSearch:
     def _late_stage_score_field( self, basin: Basin ) -> tuple[ np.ndarray, np.ndarray, float ]:
         focus_mask, elite_proximity, coverage = self._late_stage_focus_mask( basin )
         support = self._decision_support_field()
-        score_field = 0.50 * self.engine.exploration_score_field() + 0.25 * support + 0.25 * elite_proximity
+        if self.engine.config.exploitation_score_late_stage:
+            score_field = 0.75 * self.engine.exploitation_score_field() + 0.25 * elite_proximity
+        else:
+            score_field = 0.50 * self.engine.exploration_score_field() + 0.25 * support + 0.25 * elite_proximity
         return focus_mask, score_field, coverage
 
     def _late_stage_translation_target( self, basin: Basin ) -> tuple[ np.ndarray, str ]:
