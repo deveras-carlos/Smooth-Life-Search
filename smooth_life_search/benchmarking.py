@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Iterable
 
 import numpy as np
 
-from .results import SearchResult
+from .core import SearchResult, SearchRunner
 
 
 @dataclass(slots=True)
@@ -17,14 +17,6 @@ class BenchmarkSummary:
     median_best_value: float
     iqr_best_value: tuple[float, float]
     success_rate: float
-
-
-class SearchRunner(Protocol):
-    """Minimal runner protocol for seeded repeated trials."""
-
-    def reset(self, seed: int | None = None) -> None: ...
-
-    def run(self) -> SearchResult: ...
 
 
 def run_seeded_trials(

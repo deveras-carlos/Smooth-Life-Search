@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..results import SearchRun
+from ..core import SearchRun
 from .viewer import render_run_frames
 
 

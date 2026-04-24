@@ -6,7 +6,7 @@ from .benchmarking import BenchmarkSummary, run_seeded_trials, summarize_results
 from .benchmarks import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
 from .exploitation_study import ExploitationStudySpec, ExploitationStudySummary, run_exploitation_study
 from .objectives import DEFAULT_BOUNDS, OBJECTIVES
-from .results import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
+from .core import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
 from .smoothlife import SmoothLifeConfig, SmoothLifeSearch
 from .tuning import StudySpec, StudySummary, run_tuning_study
 from .visualization import open_run_viewer, render_run_frames, save_run_animation, snapshot_to_image

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..results import Basin
+from ..core import Basin
 from .config import AGSLSConfig
 
 

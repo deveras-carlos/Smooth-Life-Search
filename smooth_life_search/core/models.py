@@ -1,11 +1,22 @@
-"""Shared result models for Smooth Life Search and AGSLS."""
+"""Shared models and protocols for SmoothLife Search."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Protocol
 
 import numpy as np
+
+Bounds2D = np.ndarray
+Objective = Callable[[np.ndarray], float]
+
+
+class SearchRunner(Protocol):
+    """Object that can produce one seeded optimization run."""
+
+    def reset(self, seed: int | None = None) -> None: ...
+
+    def run(self) -> "SearchRun": ...
 
 
 @dataclass(slots=True)

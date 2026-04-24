@@ -7,7 +7,7 @@ from typing import Callable
 import numpy as np
 
 from ..adaptive import KERNEL_PARAMETER_FIELDS, RuntimeSignals, SMOOTHLIFE_PER_STEP_FIELDS, SchedulePolicy, ZOOM_BOUNDARY_FIELDS
-from ..results import Basin, SearchRun, SmoothLifeSnapshot
+from ..core import Basin, SearchRun, SmoothLifeSnapshot, normalize_bounds_2d
 from .basins import detect_basins
 from .config import SmoothLifeConfig
 from .kernels import build_disk_kernel, build_ring_kernel, periodic_convolve2d
@@ -49,12 +49,7 @@ class SmoothLifeSearch:
 
     @staticmethod
     def _normalize_bounds( bounds: np.ndarray | list[ tuple[ float, float ] ] ) -> np.ndarray:
-        arr = np.asarray( bounds, dtype=float )
-        if arr.shape != ( 2, 2 ):
-            raise ValueError( "SmoothLifeSearch currently supports exactly 2D bounds" )
-        if np.any( arr[ :, 1 ] <= arr[ :, 0 ] ):
-            raise ValueError( "each bound must satisfy lower < upper" )
-        return arr
+        return normalize_bounds_2d( bounds, owner="SmoothLifeSearch" )
 
     def _worst_value( self ) -> float:
         return -np.inf if self.config.maximize else np.inf

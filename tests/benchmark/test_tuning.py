@@ -24,7 +24,7 @@ from smooth_life_search import (
     sphere,
     summarize_results,
 )
-from smooth_life_search.results import SearchRun
+from smooth_life_search.core import SearchRun
 
 
 def _trial_rows(path: Path) -> list[dict[str, object]]:

@@ -6,7 +6,7 @@ from collections import deque
 
 import numpy as np
 
-from ..results import Basin
+from ..core import Basin
 
 _NEIGHBOR_OFFSETS = tuple( ( dr, dc ) for dr in ( -1, 0, 1 ) for dc in ( -1, 0, 1 ) if dr != 0 or dc != 0 )
 

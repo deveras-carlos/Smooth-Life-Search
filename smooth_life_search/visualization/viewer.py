@@ -7,7 +7,7 @@ from tkinter import ttk
 
 from PIL import Image, ImageTk
 
-from ..results import SearchRun, SmoothLifeSnapshot
+from ..core import SearchRun, SmoothLifeSnapshot
 from .frames import snapshot_to_image
 
 

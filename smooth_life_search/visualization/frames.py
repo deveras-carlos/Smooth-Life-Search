@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 import numpy as np
 
-from ..results import SearchRun, SmoothLifeSnapshot
+from ..core import SearchRun, SmoothLifeSnapshot
 from .overlays import draw_bbox, draw_point_marker, draw_world_path, world_to_image_xy
 
 _PANEL_GAP = 16

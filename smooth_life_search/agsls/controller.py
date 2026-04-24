@@ -8,7 +8,7 @@ from typing import Callable
 import numpy as np
 
 from ..adaptive import AGSLS_PER_DECISION_FIELDS, RuntimeSignals, SchedulePolicy, SMOOTHLIFE_PER_STEP_FIELDS, ZOOM_BOUNDARY_FIELDS
-from ..results import Basin, SearchRun, ZoomEvent
+from ..core import Basin, SearchRun, ZoomEvent, bounds_area, normalize_bounds_2d, point_in_bounds
 from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.simulator import SmoothLifeSearch
 from .config import AGSLSConfig
@@ -50,12 +50,7 @@ class AdaptiveGridSmoothLifeSearch:
 
     @staticmethod
     def _normalize_bounds( bounds: np.ndarray | list[ tuple[ float, float ] ] ) -> np.ndarray:
-        arr = np.asarray( bounds, dtype=float )
-        if arr.shape != ( 2, 2 ):
-            raise ValueError( "AGSLS currently supports exactly 2D bounds" )
-        if np.any( arr[ :, 1 ] <= arr[ :, 0 ] ):
-            raise ValueError( "each bound must satisfy lower < upper" )
-        return arr
+        return normalize_bounds_2d( bounds, owner="AGSLS" )
 
     def reset( self, seed: int | None = None ) -> None:
         """Reset the underlying SmoothLife engine and zoom history."""
@@ -106,22 +101,14 @@ class AdaptiveGridSmoothLifeSearch:
 
     @staticmethod
     def _bounds_area( bounds: np.ndarray ) -> float:
-        widths = np.asarray( bounds, dtype=float )[ :, 1 ] - np.asarray( bounds, dtype=float )[ :, 0 ]
-        return float( max( widths[ 0 ], 1e-12 ) * max( widths[ 1 ], 1e-12 ) )
+        return bounds_area( bounds )
 
     def _box_area_ratio( self, bounds: np.ndarray ) -> float:
         return self._bounds_area( bounds ) / max( self._bounds_area( self.original_bounds ), 1e-12 )
 
     @staticmethod
     def _point_in_bounds( point: np.ndarray, bounds: np.ndarray ) -> bool:
-        resolved_point = np.asarray( point, dtype=float )
-        resolved_bounds = np.asarray( bounds, dtype=float )
-        return bool(
-            resolved_point.shape == ( 2, )
-            and np.all( np.isfinite( resolved_point ) )
-            and np.all( resolved_point >= resolved_bounds[ :, 0 ] )
-            and np.all( resolved_point <= resolved_bounds[ :, 1 ] )
-        )
+        return point_in_bounds( point, bounds )
 
     def _objective_value_key( self, value: float ) -> float:
         return float( value ) if self.engine.config.maximize else -float( value )
