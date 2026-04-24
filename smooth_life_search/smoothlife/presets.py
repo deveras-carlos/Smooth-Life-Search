@@ -55,6 +55,7 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         diffusion=config.diffusion,
         objective_coupling=config.objective_coupling,
         objective_gamma=config.objective_gamma,
+        support_ema_alpha=config.support_ema_alpha,
         field_floor=config.field_floor,
         field_ceiling=config.field_ceiling,
         initial_field_center=config.initial_field_center,

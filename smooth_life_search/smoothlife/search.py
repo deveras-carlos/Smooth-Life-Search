@@ -119,6 +119,7 @@ class SmoothLifeSearch:
             inner_fill=zeros.copy(),
             outer_fill=zeros.copy(),
             transition_field=zeros.copy(),
+            support_ema=zeros.copy(),
             bounds=current_bounds,
             best_point=default_point.copy(),
             best_value=worst_value,
@@ -132,6 +133,7 @@ class SmoothLifeSearch:
         self._refresh_dynamics_fields()
         self._bootstrap_exploration()
         self._refresh_dynamics_fields()
+        self._reset_support_ema()
         self.snapshots = [ self.snapshot() ]
         self._reset_improvement_trackers()
 
@@ -197,6 +199,25 @@ class SmoothLifeSearch:
         state = self._require_state()
         return self.vitality( state.field ) * state.objective_field
 
+    def _reset_support_ema( self ) -> None:
+        state = self._require_state()
+        state.support_ema = self.support_field().copy()
+
+    def _update_support_ema( self ) -> None:
+        state = self._require_state()
+        support = self.support_field()
+        alpha = float( self.config.support_ema_alpha )
+        if alpha <= 0.0:
+            state.support_ema = support.copy()
+            return
+        state.support_ema = ( 1.0 - alpha ) * state.support_ema + alpha * support
+
+    def smoothed_support_field( self ) -> np.ndarray:
+        state = self._require_state()
+        if self.config.support_ema_alpha <= 0.0:
+            return self.support_field()
+        return state.support_ema.copy()
+
     def current_bounds( self ) -> np.ndarray:
         return self._require_state().bounds.copy()
 
@@ -248,6 +269,8 @@ class SmoothLifeSearch:
             if "objective_gamma" in changed:
                 self._refresh_objective_field()
             self._refresh_dynamics_fields()
+            if "support_ema_alpha" in changed:
+                self._reset_support_ema()
         return changed
 
     def apply_runtime_policy( self, allowed_fields: set[ str ] | frozenset[ str ], *, rebuild_kernels: bool ) -> dict[ str, float | int ]:
@@ -341,6 +364,7 @@ class SmoothLifeSearch:
         self._refresh_objective_field()
         self._update_best_records()
         self._refresh_dynamics_fields()
+        self._update_support_ema()
         self._update_improvement_trackers()
         return int( values.size )
 
@@ -427,12 +451,13 @@ class SmoothLifeSearch:
         cluster_min_samples: int = 6,
         basin_envelope_quantile_offset: float = 0.08,
         basin_envelope_growth_pixels: int = 1,
+        support_field: np.ndarray | None = None,
     ) -> list[ Basin ]:
         """Extract promising dense groups from the current support field."""
 
         state = self._require_state()
         return detect_basins(
-            support_field=self.support_field(),
+            support_field=self.support_field() if support_field is None else np.asarray( support_field, dtype=float ),
             objective_field=state.objective_field,
             bounds=state.bounds,
             alive_mask=self.alive_mask( alive_core_threshold ),
@@ -494,6 +519,7 @@ class SmoothLifeSearch:
         self._refresh_dynamics_fields()
         self._bootstrap_exploration()
         self._refresh_dynamics_fields()
+        self._reset_support_ema()
         self._reset_improvement_trackers()
         self._capture_snapshot( force=True )
 

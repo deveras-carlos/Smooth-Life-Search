@@ -28,6 +28,7 @@ class SmoothLifeConfig:
     diffusion: float = 0.10
     objective_coupling: float = 0.30
     objective_gamma: float = 1.0
+    support_ema_alpha: float = 0.0
     field_floor: float = -1.0
     field_ceiling: float = 1.0
     initial_field_center: float = 0.0
@@ -60,6 +61,8 @@ class SmoothLifeConfig:
             raise ValueError("objective_coupling must be in [0, 1]")
         if self.objective_gamma <= 0.0:
             raise ValueError("objective_gamma must be positive")
+        if not 0.0 <= self.support_ema_alpha <= 1.0:
+            raise ValueError("support_ema_alpha must be in [0, 1]")
         if self.field_floor >= self.field_ceiling:
             raise ValueError("field_floor must be less than field_ceiling")
         if self.evaluations_per_step <= 0:

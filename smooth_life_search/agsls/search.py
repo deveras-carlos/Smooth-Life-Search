@@ -267,6 +267,12 @@ class AdaptiveGridSmoothLifeSearch:
         else:
             self._last_top_basin_score_gap = 0.0
 
+    def _decision_support_field( self ) -> np.ndarray:
+        smoothed_support = getattr( self.engine, "smoothed_support_field", None )
+        if callable( smoothed_support ):
+            return np.asarray( smoothed_support(), dtype=float )
+        return np.asarray( self.engine.support_field(), dtype=float )
+
     def _persistence_map(
         self,
         steps: int,
@@ -288,7 +294,7 @@ class AdaptiveGridSmoothLifeSearch:
             state = self.engine.state
             if state is None:
                 raise RuntimeError( "engine state missing after step" )
-            support = self.engine.support_field()
+            support = self._decision_support_field()
             alive = self.engine.alive_mask( self.agsls_config.alive_core_threshold )
             threshold = float( np.quantile( support, self.agsls_config.basin_quantile ) )
             persistence += ( alive & ( support >= threshold ) ).astype( float )
@@ -304,6 +310,7 @@ class AdaptiveGridSmoothLifeSearch:
             cluster_min_samples=self.agsls_config.cluster_min_samples,
             basin_envelope_quantile_offset=self.agsls_config.basin_envelope_quantile_offset,
             basin_envelope_growth_pixels=self.agsls_config.basin_envelope_growth_pixels,
+            support_field=self._decision_support_field(),
         )
         for basin in basins:
             scoring_mask = basin.core_mask if basin.core_mask is not None else basin.mask
@@ -437,7 +444,7 @@ class AdaptiveGridSmoothLifeSearch:
             raise RuntimeError( "engine state missing" )
         base_mask = np.asarray( basin.mask, dtype=bool )
         explored_mask = base_mask & np.asarray( state.evaluated_mask, dtype=bool )
-        support = self.engine.support_field()
+        support = self._decision_support_field()
         if not np.any( explored_mask ):
             coverage = 1.0 if np.any( base_mask ) else 0.0
             return base_mask.copy(), np.asarray( support, dtype=float ), float( coverage )
@@ -465,7 +472,7 @@ class AdaptiveGridSmoothLifeSearch:
 
     def _late_stage_score_field( self, basin: Basin ) -> tuple[ np.ndarray, np.ndarray, float ]:
         focus_mask, elite_proximity, coverage = self._late_stage_focus_mask( basin )
-        support = np.asarray( self.engine.support_field(), dtype=float )
+        support = self._decision_support_field()
         score_field = 0.50 * self.engine.exploration_score_field() + 0.25 * support + 0.25 * elite_proximity
         return focus_mask, score_field, coverage
 
@@ -1133,7 +1140,7 @@ class AdaptiveGridSmoothLifeSearch:
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
-        support = self.engine.support_field()
+        support = self._decision_support_field()
         uncertainty = 1.0 - np.abs( state.objective_field - 0.5 ) * 2.0
         return self.engine.exploration_score_field() + 0.35 * support + 0.15 * np.clip( uncertainty, 0.0, 1.0 )
 

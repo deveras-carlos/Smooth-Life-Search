@@ -18,6 +18,7 @@ class SmoothLifeState:
     inner_fill: np.ndarray
     outer_fill: np.ndarray
     transition_field: np.ndarray
+    support_ema: np.ndarray
     bounds: np.ndarray
     best_point: np.ndarray
     best_value: float
