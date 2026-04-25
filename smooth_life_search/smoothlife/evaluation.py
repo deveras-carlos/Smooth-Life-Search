@@ -100,7 +100,7 @@ def _axis_subpixel_offset(p0: float, p1: float, p2: float, *, maximize: bool) ->
     return float(np.clip(delta, -0.5, 0.5))
 
 
-def subpixel_best_offset(
+def _separable_subpixel_offset(
     objective_values: np.ndarray,
     evaluated_mask: np.ndarray,
     row: int,
@@ -108,13 +108,6 @@ def subpixel_best_offset(
     *,
     maximize: bool,
 ) -> tuple[float, float]:
-    """Return the (drow, dcol) sub-pixel offset of the optimum near ``(row, col)``.
-
-    Uses a separable parabolic fit on each axis when both neighbours are evaluated;
-    otherwise the offset along that axis is ``0``. The result is always in
-    ``[-0.5, 0.5]`` along each axis.
-    """
-
     height, width = objective_values.shape
     drow = 0.0
     dcol = 0.0
@@ -133,3 +126,84 @@ def subpixel_best_offset(
             maximize=maximize,
         )
     return drow, dcol
+
+
+def _joint_subpixel_offset(
+    window: np.ndarray,
+    *,
+    maximize: bool,
+) -> tuple[float, float] | None:
+    """Fit ``f(dcol, drow) = a + b*x + h*y + d*x^2 + e*x*y + g*y^2``
+    by least squares to a fully-populated 3x3 window of cached values.
+
+    ``window[i, j]`` is the sample at (drow = i - 1, dcol = j - 1).
+
+    Returns ``(drow, dcol)`` clamped to ``[-0.5, 0.5]^2`` or ``None`` when the
+    Hessian is ill-conditioned or has the wrong definiteness for the requested
+    extremum kind.
+    """
+
+    y0 = float(window.sum())
+    y1 = float(window[:, 0].sum() + window[:, 2].sum())  # sum dcol^2 * f
+    y2 = float(window[0, :].sum() + window[2, :].sum())  # sum drow^2 * f
+    b = float((window[:, 2].sum() - window[:, 0].sum()) / 6.0)
+    h = float((window[2, :].sum() - window[0, :].sum()) / 6.0)
+    e = float((window[0, 0] + window[2, 2] - window[2, 0] - window[0, 2]) / 4.0)
+    d = float((-2.0 * y0 + 3.0 * y1) / 6.0)
+    g = float((-2.0 * y0 + 3.0 * y2) / 6.0)
+
+    det = 4.0 * d * g - e * e
+    if not np.isfinite(det) or abs(det) < 1e-12:
+        return None
+    if maximize:
+        if d >= 0.0 or det <= 0.0:
+            return None
+    else:
+        if d <= 0.0 or det <= 0.0:
+            return None
+
+    dcol_star = (e * h - 2.0 * g * b) / det
+    drow_star = (e * b - 2.0 * d * h) / det
+    if not (np.isfinite(dcol_star) and np.isfinite(drow_star)):
+        return None
+    return (
+        float(np.clip(drow_star, -0.5, 0.5)),
+        float(np.clip(dcol_star, -0.5, 0.5)),
+    )
+
+
+def subpixel_best_offset(
+    objective_values: np.ndarray,
+    evaluated_mask: np.ndarray,
+    row: int,
+    col: int,
+    *,
+    maximize: bool,
+) -> tuple[float, float]:
+    """Return the (drow, dcol) sub-pixel offset of the optimum near ``(row, col)``.
+
+    When the full 3x3 neighborhood is evaluated, fit a joint 2D quadratic and
+    return its vertex. This captures the cross (``dcol*drow``) term that a
+    separable axis-wise fit misses on non-axis-aligned landscapes (Rosenbrock's
+    banana valley is the canonical case). When any neighbor is unevaluated or
+    the Hessian is ill-conditioned, fall back to the separable axis-wise fit.
+    The result is always clamped to ``[-0.5, 0.5]`` along each axis.
+    """
+
+    height, width = objective_values.shape
+    if (
+        0 < row < height - 1
+        and 0 < col < width - 1
+        and bool(evaluated_mask[row - 1 : row + 2, col - 1 : col + 2].all())
+    ):
+        window = objective_values[row - 1 : row + 2, col - 1 : col + 2].astype(float, copy=False)
+        joint = _joint_subpixel_offset(window, maximize=maximize)
+        if joint is not None:
+            return joint
+    return _separable_subpixel_offset(
+        objective_values,
+        evaluated_mask,
+        row,
+        col,
+        maximize=maximize,
+    )
