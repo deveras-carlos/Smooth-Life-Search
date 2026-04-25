@@ -71,14 +71,37 @@ def best_evaluated_flat_index(
 ) -> int | None:
     """Return the flat index of the best explored pixel, or ``None``."""
 
-    if not np.any(evaluated_mask):
-        return None
+    top = top_evaluated_flat_indices(
+        objective_values,
+        evaluated_mask,
+        maximize=maximize,
+        limit=1,
+    )
+    return None if not top else top[0]
+
+
+def top_evaluated_flat_indices(
+    objective_values: np.ndarray,
+    evaluated_mask: np.ndarray,
+    *,
+    maximize: bool,
+    limit: int,
+) -> tuple[int, ...]:
+    """Return up to ``limit`` explored flat indices ordered from best to worst."""
+
+    if limit <= 0 or not np.any(evaluated_mask):
+        return ()
     flat_mask = evaluated_mask.ravel()
     flat_values = objective_values.ravel()
     explored_indices = np.flatnonzero(flat_mask)
+    if explored_indices.size == 0:
+        return ()
     explored_values = flat_values[explored_indices]
-    local_offset = int(np.argmax(explored_values) if maximize else np.argmin(explored_values))
-    return int(explored_indices[local_offset])
+    order = np.argsort(explored_values)
+    if maximize:
+        order = order[::-1]
+    resolved_limit = min(int(limit), int(order.size))
+    return tuple(int(explored_indices[int(offset)]) for offset in order[:resolved_limit])
 
 
 def _axis_subpixel_offset(p0: float, p1: float, p2: float, *, maximize: bool) -> float:

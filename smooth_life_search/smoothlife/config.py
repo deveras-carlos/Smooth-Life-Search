@@ -42,6 +42,7 @@ class SmoothLifeConfig:
     store_all_snapshots: bool = True
     subpixel_best_point: bool = True
     subpixel_confirm: bool = True
+    subpixel_confirm_candidates: int = 1
     exploitation_score_late_stage: bool = False
 
     def __post_init__(self) -> None:
@@ -71,3 +72,5 @@ class SmoothLifeConfig:
             raise ValueError("evaluations_per_step must be positive")
         if self.snapshot_interval <= 0:
             raise ValueError("snapshot_interval must be positive")
+        if self.subpixel_confirm_candidates < 1:
+            raise ValueError("subpixel_confirm_candidates must be at least 1")

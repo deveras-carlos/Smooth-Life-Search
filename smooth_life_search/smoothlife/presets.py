@@ -52,6 +52,7 @@ PRESET_BUILDERS: dict[str, SmoothLifeConfig] = {
         support_ema_alpha=0.30,
         subpixel_best_point=True,
         subpixel_confirm=True,
+        subpixel_confirm_candidates=3,
         exploitation_score_late_stage=True,
         run_mode="search",
     ),
@@ -88,7 +89,12 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         store_all_snapshots=config.store_all_snapshots,
         subpixel_best_point=config.subpixel_best_point,
     )
-    for field_name in ("support_ema_alpha", "subpixel_confirm", "exploitation_score_late_stage"):
+    for field_name in (
+        "support_ema_alpha",
+        "subpixel_confirm",
+        "subpixel_confirm_candidates",
+        "exploitation_score_late_stage",
+    ):
         config_value = getattr(config, field_name)
         preset_value = getattr(preset, field_name)
         default_value = getattr(defaults, field_name)

@@ -29,10 +29,10 @@ from .dynamics import (
 )
 from .evaluation import (
     blank_objective_cache,
-    best_evaluated_flat_index,
     evaluation_points,
     normalized_objective_field,
     subpixel_best_offset,
+    top_evaluated_flat_indices,
 )
 from .kernels import build_disk_kernel, build_ring_kernel
 from .presets import apply_preset
@@ -310,22 +310,39 @@ class SmoothLifeSearch:
 
     def _update_best_records( self ) -> None:
         state = self._require_state()
-        best_flat = best_evaluated_flat_index(
+        candidate_limit = int( self.config.subpixel_confirm_candidates ) if self.config.subpixel_confirm else 1
+        best_flats = top_evaluated_flat_indices(
             state.objective_values,
             state.evaluated_mask,
             maximize=self.config.maximize,
+            limit=candidate_limit,
         )
-        if best_flat is None:
+        if not best_flats:
             return
         flat_values = state.objective_values.ravel()
-        candidate_value = float( flat_values[ best_flat ] )
-        candidate_point, has_subpixel_offset = self._subpixel_best_candidate( best_flat, state )
-        if has_subpixel_offset and self.config.subpixel_confirm:
-            confirmed = self._confirm_subpixel_candidate( candidate_point )
-            if confirmed is not None and self._is_better( confirmed, candidate_value ):
-                candidate_value = float( confirmed )
-            else:
-                candidate_point = self._flat_index_to_point( best_flat, state.bounds )
+        candidate_value: float | None = None
+        candidate_point: np.ndarray | None = None
+        for best_flat in best_flats:
+            grid_value = float( flat_values[ best_flat ] )
+            grid_point = self._flat_index_to_point( best_flat, state.bounds )
+            tested_value = grid_value
+            tested_point = grid_point
+            subpixel_point, has_subpixel_offset = self._subpixel_best_candidate( best_flat, state )
+            if has_subpixel_offset:
+                if self.config.subpixel_confirm:
+                    confirmed = self._confirm_subpixel_candidate( subpixel_point )
+                    if confirmed is not None and self._is_better( confirmed, tested_value ):
+                        tested_value = float( confirmed )
+                        tested_point = subpixel_point
+                else:
+                    tested_point = subpixel_point
+            if candidate_value is None or self._is_better( tested_value, candidate_value ):
+                candidate_value = tested_value
+                candidate_point = tested_point.copy()
+            if self.config.subpixel_confirm and not self._confirmation_budget_available():
+                break
+        if candidate_value is None or candidate_point is None:
+            return
         state.box_best_point = candidate_point.copy()
         state.box_best_value = candidate_value
         if not np.isfinite( state.best_value ) or self._is_better( candidate_value, state.best_value ):
@@ -386,6 +403,12 @@ class SmoothLifeSearch:
             return 0
         rows = rows[ unexplored ]
         cols = cols[ unexplored ]
+        if self.active_max_evaluations is not None:
+            remaining = int( self.active_max_evaluations ) - int( state.evaluations )
+            if remaining <= 0:
+                return 0
+            rows = rows[ :remaining ]
+            cols = cols[ :remaining ]
         points = self._evaluation_points( rows, cols, state.bounds )
         values = np.asarray( [ float( self.objective( point ) ) for point in points ], dtype=float )
         state.objective_values[ rows, cols ] = values
