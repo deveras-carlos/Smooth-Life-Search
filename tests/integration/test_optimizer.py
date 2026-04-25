@@ -142,7 +142,7 @@ class TestSmoothLifeSearch( unittest.TestCase ):
 
     def test_each_step_evaluates_only_new_pixels( self ) -> None:
         objective = CountingObjective()
-        config = SmoothLifeConfig( grid_shape=( 40, 40 ), evaluations_per_step=4, snapshot_interval=1, preset="search" )
+        config = SmoothLifeConfig( grid_shape=( 40, 40 ), evaluations_per_step=4, snapshot_interval=1, preset="search", subpixel_confirm=False )
         search = SmoothLifeSearch( objective, bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ], config=config )
         objective.count = 0
         search.reset( seed=3 )

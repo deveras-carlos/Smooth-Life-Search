@@ -87,7 +87,7 @@ def _maybe_build_gamma_policy(args: argparse.Namespace) -> SchedulePolicy | None
         gamma_end = 1.25
     if gamma_end is None:
         return None
-    activation = float(getattr(args, "gamma_ramp_activation", 0.6))
+    activation = float(getattr(args, "gamma_ramp_activation", 0.3))
     return build_gamma_ramp_policy(end=float(gamma_end), activation_zoom_fraction=activation)
 
 
@@ -473,7 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     agsls_shared.add_argument("--shrink-kernels", action="store_true", help="Linearly shrink SmoothLife kernel radii across zoom cycles for exploitation-favoured dynamics.")
     agsls_shared.add_argument("--kernel-shrink-end-scale", type=float, default=0.6, help="End-of-run scale applied to inner/outer kernel radii when --shrink-kernels is set.")
     agsls_shared.add_argument("--gamma-ramp", type=float, default=None, metavar="END", help="Ramp SmoothLife objective_gamma from 1.0 to END over late zoom progress.")
-    agsls_shared.add_argument("--gamma-ramp-activation", type=float, default=0.6, help="Zoom fraction where --gamma-ramp begins.")
+    agsls_shared.add_argument("--gamma-ramp-activation", type=float, default=0.3, help="Zoom fraction where --gamma-ramp begins.")
 
     single = subparsers.add_parser("single", parents=[shared, agsls_shared], help="Run one AGSLS optimization job.")
     single.add_argument("--show-stages", action="store_true", help="Print per-zoom details.")

@@ -88,21 +88,12 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         store_all_snapshots=config.store_all_snapshots,
         subpixel_best_point=config.subpixel_best_point,
     )
-    if config.preset == "search_exploit":
-        if config.support_ema_alpha == defaults.support_ema_alpha:
-            resolved.support_ema_alpha = preset.support_ema_alpha
+    for field_name in ("support_ema_alpha", "subpixel_confirm", "exploitation_score_late_stage"):
+        config_value = getattr(config, field_name)
+        preset_value = getattr(preset, field_name)
+        default_value = getattr(defaults, field_name)
+        if config_value == default_value and preset_value != default_value:
+            setattr(resolved, field_name, preset_value)
         else:
-            resolved.support_ema_alpha = config.support_ema_alpha
-        if config.subpixel_confirm == defaults.subpixel_confirm:
-            resolved.subpixel_confirm = preset.subpixel_confirm
-        else:
-            resolved.subpixel_confirm = config.subpixel_confirm
-        if config.exploitation_score_late_stage == defaults.exploitation_score_late_stage:
-            resolved.exploitation_score_late_stage = preset.exploitation_score_late_stage
-        else:
-            resolved.exploitation_score_late_stage = config.exploitation_score_late_stage
-    else:
-        resolved.support_ema_alpha = config.support_ema_alpha
-        resolved.subpixel_confirm = config.subpixel_confirm
-        resolved.exploitation_score_late_stage = config.exploitation_score_late_stage
+            setattr(resolved, field_name, config_value)
     return resolved

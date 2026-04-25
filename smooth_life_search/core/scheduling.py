@@ -13,6 +13,7 @@ SMOOTHLIFE_PER_STEP_FIELDS = frozenset(
         "diffusion",
         "objective_coupling",
         "objective_gamma",
+        "support_ema_alpha",
         "evaluations_per_step",
     }
 )
@@ -364,9 +365,15 @@ def build_gamma_ramp_policy(
     *,
     start: float = 1.0,
     end: float = 1.25,
-    activation_zoom_fraction: float = 0.6,
+    activation_zoom_fraction: float = 0.3,
 ) -> "SchedulePolicy":
-    """Return a delayed zoom-linear objective-gamma ramp policy."""
+    """Return a delayed zoom-linear objective-gamma ramp policy.
+
+    With the default ``activation_zoom_fraction=0.3`` and a typical
+    ``max_zoom_cycles=5``, ``objective_gamma`` begins ramping at zoom_index 2
+    and reaches ``end`` at zoom_index 4 — giving the sharpening 60% of the
+    run to take effect, instead of only the final zoom.
+    """
 
     if not 0.0 < start <= 3.0:
         raise ValueError("start must be in (0, 3]")
@@ -389,6 +396,45 @@ def build_gamma_ramp_policy(
         ),
         family="objective_gamma",
         schedule_kind="guarded_zoom_linear",
+    )
+
+
+def build_ema_alpha_ramp_policy(
+    *,
+    start: float = 0.30,
+    end: float = 0.05,
+    activation_zoom_fraction: float = 0.0,
+) -> "SchedulePolicy":
+    """Return a zoom-linear ``support_ema_alpha`` ramp policy.
+
+    In the EMA update ``ema = (1-α) * ema + α * support``, a large α tracks the
+    current support quickly (responsive, little smoothing) and a small α
+    preserves history (heavy smoothing). The default ramp goes from a large
+    responsive α early — so early-zoom basin detection follows the freshly
+    bootstrapped support signal — to a small smoothing α late, filtering
+    step-to-step support flicker that otherwise drives seed variance in
+    late-stage basin decisions.
+    """
+
+    if not 0.0 <= start <= 1.0:
+        raise ValueError("start must be in [0, 1]")
+    if not 0.0 <= end <= 1.0:
+        raise ValueError("end must be in [0, 1]")
+    if not 0.0 <= activation_zoom_fraction < 1.0:
+        raise ValueError("activation_zoom_fraction must be in [0, 1)")
+    return SchedulePolicy(
+        schedules=(
+            FieldSchedule(
+                field_name="support_ema_alpha",
+                mode="zoom_linear",
+                base_value=float(start),
+                low_value=float(start),
+                high_value=float(end),
+                activation_fraction=float(activation_zoom_fraction),
+            ),
+        ),
+        family="support_ema_alpha",
+        schedule_kind="zoom_linear",
     )
 
 
@@ -426,6 +472,7 @@ __all__ = [
     "ScheduleFieldStats",
     "SchedulePolicy",
     "ZOOM_BOUNDARY_FIELDS",
+    "build_ema_alpha_ramp_policy",
     "build_gamma_ramp_policy",
     "build_kernel_shrink_policy",
     "combine_schedule_policies",
