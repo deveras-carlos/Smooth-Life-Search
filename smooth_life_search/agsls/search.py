@@ -218,6 +218,8 @@ class AdaptiveGridSmoothLifeSearch:
         snapshot.local_best_value = float( state.local_best_value )
         snapshot.box_best_point = state.box_best_point.copy()
         snapshot.box_best_value = float( state.box_best_value )
+        snapshot.metadata[ "evaluations" ] = int( state.evaluations )
+        snapshot.metadata[ "explored_fraction" ] = float( np.mean( state.evaluated_mask ) )
 
     def runtime_signals( self ) -> RuntimeSignals:
         base = self.engine.runtime_signals()
@@ -1109,6 +1111,312 @@ class AdaptiveGridSmoothLifeSearch:
             coverage = 1.0
         return gained, float( coverage )
 
+    @staticmethod
+    def _final_polish_value_payload( value: float | None ) -> float | None:
+        if value is None or not np.isfinite( value ):
+            return None
+        return float( value )
+
+    @staticmethod
+    def _final_polish_point_payload( point: np.ndarray | None ) -> list[ float ]:
+        if point is None:
+            return [ ]
+        resolved = np.asarray( point, dtype=float )
+        if resolved.shape != ( 2, ) or not np.all( np.isfinite( resolved ) ):
+            return [ ]
+        return resolved.tolist()
+
+    def _final_polish_summary(
+        self,
+        *,
+        enabled: bool,
+        ran: bool,
+        start_point: np.ndarray | None,
+        start_value: float | None,
+        final_point: np.ndarray | None,
+        final_value: float | None,
+        evaluations_spent: int,
+        iterations: int,
+        exit_reason: str,
+    ) -> dict[ str, object ]:
+        return {
+            "enabled": bool( enabled ),
+            "ran": bool( ran ),
+            "kind": "fd_bfgs",
+            "start_point": self._final_polish_point_payload( start_point ),
+            "start_value": self._final_polish_value_payload( start_value ),
+            "final_point": self._final_polish_point_payload( final_point ),
+            "final_value": self._final_polish_value_payload( final_value ),
+            "evaluations_spent": int( evaluations_spent ),
+            "iterations": int( iterations ),
+            "exit_reason": str( exit_reason ),
+        }
+
+    def _store_final_polish_summary( self, summary: dict[ str, object ] ) -> dict[ str, object ]:
+        self._sync_latest_snapshot_state()
+        if self.engine.snapshots:
+            self.engine.snapshots[ -1 ].metadata[ "final_polish" ] = dict( summary )
+        return summary
+
+    def _final_polish_loss( self, value: float ) -> float:
+        return -float( value ) if self.engine.config.maximize else float( value )
+
+    def _final_polish_bounds( self, point: np.ndarray ) -> np.ndarray | None:
+        state = self.engine.state
+        if state is None:
+            raise RuntimeError( "engine state missing" )
+        current_bounds = np.asarray( state.bounds, dtype=float )
+        if self._point_in_bounds( point, current_bounds ):
+            return current_bounds.copy()
+        original_bounds = np.asarray( self.original_bounds, dtype=float )
+        if self._point_in_bounds( point, original_bounds ):
+            return original_bounds.copy()
+        return None
+
+    def _run_final_polish( self ) -> dict[ str, object ]:
+        """Spend leftover budget on bounded finite-difference BFGS from the incumbent."""
+
+        state = self.engine.state
+        if state is None:
+            raise RuntimeError( "engine state missing" )
+        start_point = state.best_point.copy()
+        start_value = float( state.best_value )
+        if not self.agsls_config.final_polish_enabled:
+            return self._store_final_polish_summary(
+                self._final_polish_summary(
+                    enabled=False,
+                    ran=False,
+                    start_point=start_point,
+                    start_value=start_value,
+                    final_point=state.best_point.copy(),
+                    final_value=float( state.best_value ),
+                    evaluations_spent=0,
+                    iterations=0,
+                    exit_reason="disabled",
+                )
+            )
+        if start_point.shape != ( 2, ) or not np.all( np.isfinite( start_point ) ) or not np.isfinite( start_value ):
+            return self._store_final_polish_summary(
+                self._final_polish_summary(
+                    enabled=True,
+                    ran=False,
+                    start_point=start_point,
+                    start_value=start_value,
+                    final_point=state.best_point.copy(),
+                    final_value=float( state.best_value ),
+                    evaluations_spent=0,
+                    iterations=0,
+                    exit_reason="invalid_seed",
+                )
+            )
+        bounds = self._final_polish_bounds( start_point )
+        if bounds is None:
+            return self._store_final_polish_summary(
+                self._final_polish_summary(
+                    enabled=True,
+                    ran=False,
+                    start_point=start_point,
+                    start_value=start_value,
+                    final_point=state.best_point.copy(),
+                    final_value=float( state.best_value ),
+                    evaluations_spent=0,
+                    iterations=0,
+                    exit_reason="invalid_seed",
+                )
+            )
+        widths = bounds[ :, 1 ] - bounds[ :, 0 ]
+        if np.any( widths <= 0.0 ) or not np.all( np.isfinite( widths ) ):
+            return self._store_final_polish_summary(
+                self._final_polish_summary(
+                    enabled=True,
+                    ran=False,
+                    start_point=start_point,
+                    start_value=start_value,
+                    final_point=state.best_point.copy(),
+                    final_value=float( state.best_value ),
+                    evaluations_spent=0,
+                    iterations=0,
+                    exit_reason="invalid_seed",
+                )
+            )
+        remaining = self._remaining_evaluations()
+        max_evaluations = int( self.agsls_config.final_polish_max_evaluations )
+        if remaining is not None:
+            max_evaluations = min( max_evaluations, int( remaining ) )
+        if max_evaluations < 5:
+            return self._store_final_polish_summary(
+                self._final_polish_summary(
+                    enabled=True,
+                    ran=False,
+                    start_point=start_point,
+                    start_value=start_value,
+                    final_point=state.best_point.copy(),
+                    final_value=float( state.best_value ),
+                    evaluations_spent=0,
+                    iterations=0,
+                    exit_reason="no_budget",
+                )
+            )
+
+        lower = bounds[ :, 0 ]
+        current_u = np.clip( ( start_point - lower ) / widths, 0.0, 1.0 )
+        current_value = start_value
+        current_loss = self._final_polish_loss( current_value )
+        inverse_hessian = np.eye( 2, dtype=float )
+        spent = 0
+        iterations = 0
+        exit_reason = "max_iterations"
+        finite_difference_step = 1e-5
+        gradient_tolerance = 1e-8
+        minimum_direction_norm = 1e-12
+        max_iterations = max( 1, min( 64, max_evaluations // 5 ) )
+
+        def to_world( normalized: np.ndarray ) -> np.ndarray:
+            return lower + np.clip( np.asarray( normalized, dtype=float ), 0.0, 1.0 ) * widths
+
+        def evaluate_points( normalized_points: np.ndarray ) -> np.ndarray | None:
+            nonlocal spent
+            resolved = np.reshape( np.asarray( normalized_points, dtype=float ), ( -1, 2 ) )
+            if resolved.size == 0:
+                return np.asarray( [ ], dtype=float )
+            count = int( resolved.shape[ 0 ] )
+            if spent + count > max_evaluations:
+                return None
+            if self._bounded_evaluation_batch( count ) < count:
+                return None
+            values = self._evaluate_arbitrary_points( np.asarray( [ to_world( point ) for point in resolved ], dtype=float ) )
+            spent += int( values.size )
+            return values
+
+        def gradient_at( normalized: np.ndarray ) -> tuple[ np.ndarray | None, str | None ]:
+            points: list[ np.ndarray ] = [ ]
+            pairs: list[ tuple[ int, int, float ] ] = [ ]
+            for axis in range( 2 ):
+                upper = np.asarray( normalized, dtype=float ).copy()
+                lower_point = np.asarray( normalized, dtype=float ).copy()
+                upper[ axis ] = min( 1.0, float( upper[ axis ] ) + finite_difference_step )
+                lower_point[ axis ] = max( 0.0, float( lower_point[ axis ] ) - finite_difference_step )
+                denominator = float( upper[ axis ] - lower_point[ axis ] )
+                if denominator <= 0.0:
+                    continue
+                upper_index = len( points )
+                points.append( upper )
+                points.append( lower_point )
+                pairs.append( ( axis, upper_index, denominator ) )
+            if not points:
+                return None, "invalid_seed"
+            values = evaluate_points( np.asarray( points, dtype=float ) )
+            if values is None:
+                return None, "budget_limit"
+            losses = np.asarray( [ self._final_polish_loss( float( value ) ) for value in values ], dtype=float )
+            gradient = np.zeros( 2, dtype=float )
+            for axis, upper_index, denominator in pairs:
+                lower_index = upper_index + 1
+                gradient[ axis ] = ( losses[ upper_index ] - losses[ lower_index ] ) / denominator
+            if not np.all( np.isfinite( gradient ) ):
+                return None, "invalid_gradient"
+            return gradient, None
+
+        gradient, failure = gradient_at( current_u )
+        if gradient is None:
+            return self._store_final_polish_summary(
+                self._final_polish_summary(
+                    enabled=True,
+                    ran=spent > 0,
+                    start_point=start_point,
+                    start_value=start_value,
+                    final_point=state.best_point.copy(),
+                    final_value=float( state.best_value ),
+                    evaluations_spent=spent,
+                    iterations=iterations,
+                    exit_reason=failure or "invalid_gradient",
+                )
+            )
+        while iterations < max_iterations:
+            if np.linalg.norm( gradient ) <= gradient_tolerance:
+                exit_reason = "gradient_converged"
+                break
+            direction = -inverse_hessian.dot( gradient )
+            if not np.all( np.isfinite( direction ) ) or float( np.dot( gradient, direction ) ) >= 0.0:
+                inverse_hessian = np.eye( 2, dtype=float )
+                direction = -gradient
+            max_component = float( np.max( np.abs( direction ) ) )
+            if max_component <= minimum_direction_norm:
+                exit_reason = "gradient_converged"
+                break
+            if max_component > 0.25:
+                direction = direction * ( 0.25 / max_component )
+            descent = float( np.dot( gradient, direction ) )
+            accepted_u: np.ndarray | None = None
+            accepted_value: float | None = None
+            accepted_loss: float | None = None
+            alpha = 1.0
+            budget_limited = False
+            while alpha >= 1e-12:
+                trial_u = np.clip( current_u + alpha * direction, 0.0, 1.0 )
+                if np.allclose( trial_u, current_u, atol=1e-15, rtol=0.0 ):
+                    alpha *= 0.5
+                    continue
+                values = evaluate_points( trial_u.reshape( 1, 2 ) )
+                if values is None:
+                    budget_limited = True
+                    break
+                trial_value = float( values[ 0 ] )
+                trial_loss = self._final_polish_loss( trial_value )
+                if trial_loss <= current_loss + 1e-4 * alpha * descent or trial_loss < current_loss:
+                    accepted_u = trial_u
+                    accepted_value = trial_value
+                    accepted_loss = trial_loss
+                    break
+                alpha *= 0.5
+            if accepted_u is None or accepted_value is None or accepted_loss is None:
+                exit_reason = "budget_limit" if budget_limited else "line_search_failed"
+                break
+            next_gradient, failure = gradient_at( accepted_u )
+            iterations += 1
+            step = accepted_u - current_u
+            if next_gradient is None:
+                current_u = accepted_u
+                current_value = accepted_value
+                current_loss = accepted_loss
+                exit_reason = failure or "budget_limit"
+                break
+            y = next_gradient - gradient
+            curvature = float( np.dot( y, step ) )
+            if curvature > 1e-14 and np.isfinite( curvature ):
+                rho = 1.0 / curvature
+                identity = np.eye( 2, dtype=float )
+                inverse_hessian = (
+                    ( identity - rho * np.outer( step, y ) )
+                    @ inverse_hessian
+                    @ ( identity - rho * np.outer( y, step ) )
+                    + rho * np.outer( step, step )
+                )
+            else:
+                inverse_hessian = np.eye( 2, dtype=float )
+            current_u = accepted_u
+            current_value = accepted_value
+            current_loss = accepted_loss
+            gradient = next_gradient
+        else:
+            exit_reason = "max_iterations"
+
+        state = self.engine.state
+        if state is None:
+            raise RuntimeError( "engine state missing" )
+        summary = self._final_polish_summary(
+            enabled=True,
+            ran=spent > 0,
+            start_point=start_point,
+            start_value=start_value,
+            final_point=state.best_point.copy(),
+            final_value=float( state.best_value ),
+            evaluations_spent=spent,
+            iterations=iterations,
+            exit_reason=exit_reason,
+        )
+        return self._store_final_polish_summary( summary )
+
     def _mark_latest_snapshot(
         self,
         *,
@@ -1191,7 +1499,7 @@ class AdaptiveGridSmoothLifeSearch:
         new_bounds = basin.bbox_world.copy()
         center = basin.basin_best_point if basin.basin_best_point is not None else basin.centroid_world
         incumbent_point = None
-        if not basin.incumbent_in_envelope and not basin.better_than_incumbent and np.all( np.isfinite( state.best_point ) ):
+        if not basin.incumbent_in_envelope and np.all( np.isfinite( state.best_point ) ):
             incumbent_point = np.asarray( state.best_point, dtype=float )
         anchor_point = basin.basin_best_point if basin.basin_best_point is not None else center
         return self._finalize_zoom_bounds(
@@ -1655,6 +1963,7 @@ class AdaptiveGridSmoothLifeSearch:
         self.engine.set_zoom_index( len( self.zoom_events ), max_zoom_cycles=limit )
         decision_rounds = 0
         max_rounds = max( limit * 4, limit )
+        final_polish_summary: dict[ str, object ] | None = None
         try:
             while len( self.zoom_events ) < limit:
                 state = self.engine.state
@@ -1681,6 +1990,7 @@ class AdaptiveGridSmoothLifeSearch:
                     break
                 if eval_limit is None and decision_rounds >= max_rounds:
                     break
+            final_polish_summary = self._run_final_polish()
         finally:
             self.active_max_evaluations = None
             self.engine.active_max_evaluations = None
@@ -1703,6 +2013,7 @@ class AdaptiveGridSmoothLifeSearch:
                 "decision_reason_counts": dict( sorted( self._decision_reason_counts.items() ) ),
                 "zoom_acceptance_count": int( self._accepted_zoom_count ),
                 "decision_trace": list( self._decision_trace ),
+                "final_polish": dict( final_polish_summary or { } ),
             },
         )
 

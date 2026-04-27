@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -22,6 +23,7 @@ from smooth_life_search import (
     render_run_frames,
     save_run_animation,
     RenderOptions,
+    rosenbrock,
     sphere,
 )
 from smooth_life_search.agsls.scoring import score_basins
@@ -548,6 +550,126 @@ class TestAGSLS( unittest.TestCase ):
         self.assertEqual( int( state.evaluated_mask.sum() ), baseline_grid_evaluations )
         self.assertTrue( np.allclose( state.best_point, probe[ 0 ] ) )
         self.assertAlmostEqual( float( state.best_value ), 0.0, places=12 )
+
+    def test_final_polish_config_validates_evaluation_cap( self ) -> None:
+        self.assertTrue( AGSLSConfig().final_polish_enabled )
+        self.assertEqual( AGSLSConfig().final_polish_max_evaluations, 512 )
+        with self.assertRaises( ValueError ):
+            AGSLSConfig( final_polish_max_evaluations=0 )
+
+    def test_final_polish_refines_rosenbrock_incumbent( self ) -> None:
+        search = AdaptiveGridSmoothLifeSearch(
+            rosenbrock,
+            bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ],
+            smoothlife_config=SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=4, snapshot_interval=1, preset="search" ),
+            agsls_config=AGSLSConfig( final_polish_max_evaluations=100, max_evaluations=1000 ),
+        )
+        search.reset( seed=12 )
+        state = search.engine.state
+        self.assertIsNotNone( state )
+        seed = np.asarray( [ 0.9871230227321184, 0.9743718113155707 ], dtype=float )
+        state.bounds = np.asarray(
+            [
+                [ 0.6751397848479499, 1.5608376815356484 ],
+                [ 0.689696065323318, 2.009733761278751 ],
+            ],
+            dtype=float,
+        )
+        seed_value = float( rosenbrock( seed ) )
+        state.best_point = seed.copy()
+        state.local_best_point = seed.copy()
+        state.box_best_point = seed.copy()
+        state.best_value = seed_value
+        state.local_best_value = seed_value
+        state.box_best_value = seed_value
+        baseline_evaluations = int( state.evaluations )
+        search.active_max_evaluations = baseline_evaluations + 100
+        search.engine.active_max_evaluations = baseline_evaluations + 100
+        try:
+            summary = search._run_final_polish()
+        finally:
+            search.active_max_evaluations = None
+            search.engine.active_max_evaluations = None
+        self.assertTrue( bool( summary[ "ran" ] ) )
+        self.assertEqual( summary[ "exit_reason" ], "gradient_converged" )
+        self.assertLess( float( state.best_value ), 1e-8 )
+        self.assertLess( float( state.best_value ), seed_value * 1e-4 )
+        self.assertLessEqual( int( summary[ "evaluations_spent" ] ), 100 )
+        self.assertEqual( int( state.evaluations ), baseline_evaluations + int( summary[ "evaluations_spent" ] ) )
+        self.assertEqual( search.engine.snapshots[ -1 ].metadata[ "final_polish" ], summary )
+
+    def test_final_polish_respects_active_budget( self ) -> None:
+        search = AdaptiveGridSmoothLifeSearch(
+            rosenbrock,
+            bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ],
+            smoothlife_config=SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=4, snapshot_interval=1, preset="search" ),
+            agsls_config=AGSLSConfig( final_polish_max_evaluations=100, max_evaluations=1000 ),
+        )
+        search.reset( seed=12 )
+        state = search.engine.state
+        self.assertIsNotNone( state )
+        seed = np.asarray( [ 0.9871230227321184, 0.9743718113155707 ], dtype=float )
+        seed_value = float( rosenbrock( seed ) )
+        state.best_point = seed.copy()
+        state.local_best_point = seed.copy()
+        state.box_best_point = seed.copy()
+        state.best_value = seed_value
+        state.local_best_value = seed_value
+        state.box_best_value = seed_value
+        baseline_evaluations = int( state.evaluations )
+        search.active_max_evaluations = baseline_evaluations + 6
+        search.engine.active_max_evaluations = baseline_evaluations + 6
+        try:
+            summary = search._run_final_polish()
+        finally:
+            search.active_max_evaluations = None
+            search.engine.active_max_evaluations = None
+        self.assertTrue( bool( summary[ "ran" ] ) )
+        self.assertEqual( summary[ "exit_reason" ], "budget_limit" )
+        self.assertLessEqual( int( summary[ "evaluations_spent" ] ), 6 )
+        self.assertLessEqual( int( state.evaluations ), baseline_evaluations + 6 )
+
+    def test_disabled_final_polish_records_metadata_without_evaluating( self ) -> None:
+        search = AdaptiveGridSmoothLifeSearch(
+            rosenbrock,
+            bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ],
+            smoothlife_config=SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=4, snapshot_interval=1, preset="search" ),
+            agsls_config=AGSLSConfig( final_polish_enabled=False ),
+        )
+        search.reset( seed=12 )
+        state = search.engine.state
+        self.assertIsNotNone( state )
+        seed = np.asarray( [ 0.9871230227321184, 0.9743718113155707 ], dtype=float )
+        seed_value = float( rosenbrock( seed ) )
+        state.best_point = seed.copy()
+        state.local_best_point = seed.copy()
+        state.box_best_point = seed.copy()
+        state.best_value = seed_value
+        state.local_best_value = seed_value
+        state.box_best_value = seed_value
+        baseline_evaluations = int( state.evaluations )
+        summary = search._run_final_polish()
+        self.assertFalse( bool( summary[ "enabled" ] ) )
+        self.assertFalse( bool( summary[ "ran" ] ) )
+        self.assertEqual( summary[ "exit_reason" ], "disabled" )
+        self.assertEqual( int( summary[ "evaluations_spent" ] ), 0 )
+        self.assertEqual( int( state.evaluations ), baseline_evaluations )
+        self.assertAlmostEqual( float( state.best_value ), seed_value, places=12 )
+
+    def test_final_polish_improves_reported_rosenbrock_seed( self ) -> None:
+        search = AdaptiveGridSmoothLifeSearch(
+            rosenbrock,
+            bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ],
+            smoothlife_config=SmoothLifeConfig( grid_shape=( 128, 128 ), preset="search", store_all_snapshots=False ),
+            agsls_config=AGSLSConfig( max_zoom_cycles=5, max_evaluations=30000 ),
+        )
+        search.reset( seed=7 )
+        run = search.run()
+        summary = run.metadata[ "final_polish" ]
+        self.assertTrue( bool( summary[ "ran" ] ) )
+        self.assertLess( float( run.best_value ), 1e-8 )
+        self.assertGreater( int( summary[ "evaluations_spent" ] ), 0 )
+        self.assertLessEqual( int( run.evaluations ), 30000 )
 
     def test_translation_config_validates_fraction_knobs( self ) -> None:
         config = AGSLSConfig(
@@ -2178,6 +2300,65 @@ class TestCli( unittest.TestCase ):
         output = stdout.getvalue()
         self.assertIn( "objective: ackley", output )
         self.assertIn( "best value:", output )
+
+    def test_single_command_wires_final_polish_flags( self ) -> None:
+        stdout = StringIO()
+        with redirect_stdout( stdout ):
+            exit_code = main.main(
+                [
+                    "single",
+                    "--objective",
+                    "sphere",
+                    "--dimension",
+                    "2",
+                    "--seed",
+                    "3",
+                    "--budget",
+                    "200",
+                    "--grid-height",
+                    "24",
+                    "--grid-width",
+                    "24",
+                    "--zoom-cycles",
+                    "1",
+                    "--final-polish-evaluations",
+                    "7",
+                    "--json",
+                ]
+            )
+        self.assertEqual( exit_code, 0 )
+        payload = json.loads( stdout.getvalue() )
+        self.assertTrue( bool( payload[ "final_polish" ][ "enabled" ] ) )
+        self.assertLessEqual( int( payload[ "final_polish" ][ "evaluations_spent" ] ), 7 )
+
+        stdout = StringIO()
+        with redirect_stdout( stdout ):
+            exit_code = main.main(
+                [
+                    "single",
+                    "--objective",
+                    "sphere",
+                    "--dimension",
+                    "2",
+                    "--seed",
+                    "3",
+                    "--budget",
+                    "200",
+                    "--grid-height",
+                    "24",
+                    "--grid-width",
+                    "24",
+                    "--zoom-cycles",
+                    "1",
+                    "--no-final-polish",
+                    "--json",
+                ]
+            )
+        self.assertEqual( exit_code, 0 )
+        payload = json.loads( stdout.getvalue() )
+        self.assertFalse( bool( payload[ "final_polish" ][ "enabled" ] ) )
+        self.assertFalse( bool( payload[ "final_polish" ][ "ran" ] ) )
+        self.assertEqual( int( payload[ "final_polish" ][ "evaluations_spent" ] ), 0 )
 
     def test_simulate_command_runs( self ) -> None:
         stdout = StringIO()

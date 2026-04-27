@@ -65,6 +65,8 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         min_steps_per_zoom=getattr(args, "min_steps_per_zoom", 8),
         zoom_decay=getattr(args, "zoom_decay", 0.75),
         max_evaluations=args.budget,
+        final_polish_enabled=getattr(args, "final_polish_enabled", True),
+        final_polish_max_evaluations=getattr(args, "final_polish_evaluations", 512),
     )
     return bounds, smoothlife, agsls
 
@@ -187,6 +189,7 @@ def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
         "bounds": run.bounds.tolist(),
         "zoom_events": _zoom_payload(run),
         "snapshots": [_snapshot_payload(snapshot) for snapshot in run.snapshots],
+        "final_polish": run.metadata.get("final_polish"),
         "gif_path": gif_path,
     }
 
@@ -213,6 +216,7 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
         "best_point": result.best_point.tolist(),
         "bounds": result.bounds.tolist(),
         "zoom_events": _zoom_payload(result),
+        "final_polish": result.metadata.get("final_polish"),
         "gif_path": gif_path,
     }
 
@@ -474,6 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
     agsls_shared.add_argument("--kernel-shrink-end-scale", type=float, default=0.6, help="End-of-run scale applied to inner/outer kernel radii when --shrink-kernels is set.")
     agsls_shared.add_argument("--gamma-ramp", type=float, default=None, metavar="END", help="Ramp SmoothLife objective_gamma from 1.0 to END over late zoom progress.")
     agsls_shared.add_argument("--gamma-ramp-activation", type=float, default=0.3, help="Zoom fraction where --gamma-ramp begins.")
+    agsls_shared.add_argument("--no-final-polish", dest="final_polish_enabled", action="store_false", default=True, help="Disable the bounded final local polish phase.")
+    agsls_shared.add_argument("--final-polish-evaluations", type=int, default=512, help="Maximum objective evaluations for final local polish.")
 
     single = subparsers.add_parser("single", parents=[shared, agsls_shared], help="Run one AGSLS optimization job.")
     single.add_argument("--show-stages", action="store_true", help="Print per-zoom details.")

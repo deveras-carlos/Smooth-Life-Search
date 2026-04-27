@@ -95,11 +95,22 @@ def finalize_zoom_bounds(
     anchor_point: np.ndarray | None = None,
     incumbent_point: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Apply minimum widths, padding, edge risk, and incumbent retention."""
+    """Apply minimum widths, padding, edge risk, and incumbent retention.
 
+    When ``incumbent_point`` is supplied and lies inside ``original_bounds`` (even
+    if it has been cropped out of ``current_bounds`` by previous zooms), the
+    resulting bounds are allowed to re-expand along the offending axis up to
+    ``original_bounds`` so the global incumbent stays in scope. AGSLS bounds are
+    therefore not strictly monotonically contracting — they may widen along an
+    axis when the incumbent demands it, but never beyond the original problem
+    space.
+    """
+
+    incumbent_active = incumbent_point is not None and np.all(np.isfinite(incumbent_point))
+    ceiling_bounds = np.asarray(original_bounds if incumbent_active else current_bounds, dtype=float)
     min_widths = minimum_zoom_widths(current_bounds, grid_shape, config)
     resolved_center = np.asarray(center, dtype=float)
-    new_bounds = expand_bounds_to_min_widths(np.asarray(bounds, dtype=float), resolved_center, min_widths, current_bounds)
+    new_bounds = expand_bounds_to_min_widths(np.asarray(bounds, dtype=float), resolved_center, min_widths, ceiling_bounds)
     anchor = resolved_center if anchor_point is None else np.asarray(anchor_point, dtype=float)
     widths = new_bounds[:, 1] - new_bounds[:, 0]
     directional_padding = config.zoom_padding * widths
@@ -109,22 +120,22 @@ def finalize_zoom_bounds(
             new_bounds[idx, 0] -= directional_padding[idx]
         if new_bounds[idx, 1] - anchor[idx] <= edge_band:
             new_bounds[idx, 1] += directional_padding[idx]
-    if incumbent_point is not None and np.all(np.isfinite(incumbent_point)):
+    if incumbent_active:
         resolved_incumbent = np.asarray(incumbent_point, dtype=float)
         for idx in range(2):
-            if resolved_incumbent[idx] < current_bounds[idx, 0] or resolved_incumbent[idx] > current_bounds[idx, 1]:
+            if resolved_incumbent[idx] < ceiling_bounds[idx, 0] or resolved_incumbent[idx] > ceiling_bounds[idx, 1]:
                 continue
             width = max(float(new_bounds[idx, 1] - new_bounds[idx, 0]), float(min_widths[idx]))
             edge_band = config.edge_risk_fraction * width
             if resolved_incumbent[idx] < new_bounds[idx, 0]:
-                new_bounds[idx, 0] = max(current_bounds[idx, 0], resolved_incumbent[idx] - edge_band)
+                new_bounds[idx, 0] = max(ceiling_bounds[idx, 0], resolved_incumbent[idx] - edge_band)
             elif resolved_incumbent[idx] > new_bounds[idx, 1]:
-                new_bounds[idx, 1] = min(current_bounds[idx, 1], resolved_incumbent[idx] + edge_band)
+                new_bounds[idx, 1] = min(ceiling_bounds[idx, 1], resolved_incumbent[idx] + edge_band)
     widths = new_bounds[:, 1] - new_bounds[:, 0]
     padding = config.zoom_padding * widths
     new_bounds[:, 0] -= padding
     new_bounds[:, 1] += padding
-    new_bounds[:, 0] = np.maximum(new_bounds[:, 0], current_bounds[:, 0])
-    new_bounds[:, 1] = np.minimum(new_bounds[:, 1], current_bounds[:, 1])
-    new_bounds = expand_bounds_to_min_widths(new_bounds, resolved_center, min_widths, current_bounds)
-    return enforce_min_side_fraction(new_bounds, current_bounds, original_bounds, config)
+    new_bounds[:, 0] = np.maximum(new_bounds[:, 0], ceiling_bounds[:, 0])
+    new_bounds[:, 1] = np.minimum(new_bounds[:, 1], ceiling_bounds[:, 1])
+    new_bounds = expand_bounds_to_min_widths(new_bounds, resolved_center, min_widths, ceiling_bounds)
+    return enforce_min_side_fraction(new_bounds, ceiling_bounds, original_bounds, config)
