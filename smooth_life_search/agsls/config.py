@@ -68,6 +68,8 @@ class AGSLSConfig:
     late_stage_pattern_search_reuse_tolerance_cells: float = 0.5
     final_polish_enabled: bool = True
     final_polish_max_evaluations: int = 512
+    inter_zoom_polish_enabled: bool = True
+    inter_zoom_polish_max_evaluations: int = 64
 
     def __post_init__(self) -> None:
         if self.max_zoom_cycles <= 0:
@@ -164,3 +166,5 @@ class AGSLSConfig:
             raise ValueError("late_stage_pattern_search_reuse_tolerance_cells must be in [0, 1]")
         if self.final_polish_max_evaluations <= 0:
             raise ValueError("final_polish_max_evaluations must be positive")
+        if self.inter_zoom_polish_max_evaluations <= 0:
+            raise ValueError("inter_zoom_polish_max_evaluations must be positive")

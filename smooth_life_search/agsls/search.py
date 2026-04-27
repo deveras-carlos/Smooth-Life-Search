@@ -68,6 +68,7 @@ class AdaptiveGridSmoothLifeSearch:
         self._late_stage_round_counts: dict[int, int] = { }
         self._late_stage_step_counts: dict[int, int] = { }
         self._periodic_local_search_summaries: dict[int, dict[str, object]] = { }
+        self._inter_zoom_polish_history: list[ dict[str, object] ] = [ ]
 
     @staticmethod
     def _normalize_bounds( bounds: np.ndarray | list[ tuple[ float, float ] ] ) -> np.ndarray:
@@ -89,6 +90,7 @@ class AdaptiveGridSmoothLifeSearch:
         self._late_stage_round_counts = { }
         self._late_stage_step_counts = { }
         self._periodic_local_search_summaries = { }
+        self._inter_zoom_polish_history = [ ]
 
     def _max_evaluations_reached( self ) -> bool:
         state = self.engine.state
@@ -1138,11 +1140,12 @@ class AdaptiveGridSmoothLifeSearch:
         evaluations_spent: int,
         iterations: int,
         exit_reason: str,
+        kind: str = "fd_bfgs",
     ) -> dict[ str, object ]:
         return {
             "enabled": bool( enabled ),
             "ran": bool( ran ),
-            "kind": "fd_bfgs",
+            "kind": str( kind ),
             "start_point": self._final_polish_point_payload( start_point ),
             "start_value": self._final_polish_value_payload( start_value ),
             "final_point": self._final_polish_point_payload( final_point ),
@@ -1174,88 +1177,117 @@ class AdaptiveGridSmoothLifeSearch:
         return None
 
     def _run_final_polish( self ) -> dict[ str, object ]:
-        """Spend leftover budget on bounded finite-difference BFGS from the incumbent."""
+        """End-of-run polish — wrapper for backward-compat metadata storage."""
+
+        summary = self._run_polish(
+            enabled=self.agsls_config.final_polish_enabled,
+            max_evaluations=int( self.agsls_config.final_polish_max_evaluations ),
+            kind="fd_bfgs",
+        )
+        return self._store_final_polish_summary( summary )
+
+    def _run_inter_zoom_polish( self ) -> dict[ str, object ]:
+        """Bounded BFGS polish run between accepted zooms; updates engine incumbent."""
+
+        summary = self._run_polish(
+            enabled=self.agsls_config.inter_zoom_polish_enabled,
+            max_evaluations=int( self.agsls_config.inter_zoom_polish_max_evaluations ),
+            kind="fd_bfgs_inter_zoom",
+        )
+        self._inter_zoom_polish_history.append( dict( summary ) )
+        if self.zoom_events:
+            self.zoom_events[ -1 ].diagnostics[ "inter_zoom_polish" ] = dict( summary )
+        return summary
+
+    def _run_polish(
+        self,
+        *,
+        enabled: bool,
+        max_evaluations: int,
+        kind: str,
+    ) -> dict[ str, object ]:
+        """Bounded finite-difference BFGS polish around ``state.best_point``.
+
+        Shared body for the end-of-run polish (R6) and the inter-zoom polish (R7).
+        Caller is responsible for storing the returned summary into the appropriate
+        metadata bucket (e.g. last snapshot's ``final_polish``, or
+        ``_inter_zoom_polish_history``).
+        """
 
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
         start_point = state.best_point.copy()
         start_value = float( state.best_value )
-        if not self.agsls_config.final_polish_enabled:
-            return self._store_final_polish_summary(
-                self._final_polish_summary(
-                    enabled=False,
-                    ran=False,
-                    start_point=start_point,
-                    start_value=start_value,
-                    final_point=state.best_point.copy(),
-                    final_value=float( state.best_value ),
-                    evaluations_spent=0,
-                    iterations=0,
-                    exit_reason="disabled",
-                )
+        if not enabled:
+            return self._final_polish_summary(
+                enabled=False,
+                ran=False,
+                start_point=start_point,
+                start_value=start_value,
+                final_point=state.best_point.copy(),
+                final_value=float( state.best_value ),
+                evaluations_spent=0,
+                iterations=0,
+                exit_reason="disabled",
+                kind=kind,
             )
         if start_point.shape != ( 2, ) or not np.all( np.isfinite( start_point ) ) or not np.isfinite( start_value ):
-            return self._store_final_polish_summary(
-                self._final_polish_summary(
-                    enabled=True,
-                    ran=False,
-                    start_point=start_point,
-                    start_value=start_value,
-                    final_point=state.best_point.copy(),
-                    final_value=float( state.best_value ),
-                    evaluations_spent=0,
-                    iterations=0,
-                    exit_reason="invalid_seed",
-                )
+            return self._final_polish_summary(
+                enabled=True,
+                ran=False,
+                start_point=start_point,
+                start_value=start_value,
+                final_point=state.best_point.copy(),
+                final_value=float( state.best_value ),
+                evaluations_spent=0,
+                iterations=0,
+                exit_reason="invalid_seed",
+                kind=kind,
             )
         bounds = self._final_polish_bounds( start_point )
         if bounds is None:
-            return self._store_final_polish_summary(
-                self._final_polish_summary(
-                    enabled=True,
-                    ran=False,
-                    start_point=start_point,
-                    start_value=start_value,
-                    final_point=state.best_point.copy(),
-                    final_value=float( state.best_value ),
-                    evaluations_spent=0,
-                    iterations=0,
-                    exit_reason="invalid_seed",
-                )
+            return self._final_polish_summary(
+                enabled=True,
+                ran=False,
+                start_point=start_point,
+                start_value=start_value,
+                final_point=state.best_point.copy(),
+                final_value=float( state.best_value ),
+                evaluations_spent=0,
+                iterations=0,
+                exit_reason="invalid_seed",
+                kind=kind,
             )
         widths = bounds[ :, 1 ] - bounds[ :, 0 ]
         if np.any( widths <= 0.0 ) or not np.all( np.isfinite( widths ) ):
-            return self._store_final_polish_summary(
-                self._final_polish_summary(
-                    enabled=True,
-                    ran=False,
-                    start_point=start_point,
-                    start_value=start_value,
-                    final_point=state.best_point.copy(),
-                    final_value=float( state.best_value ),
-                    evaluations_spent=0,
-                    iterations=0,
-                    exit_reason="invalid_seed",
-                )
+            return self._final_polish_summary(
+                enabled=True,
+                ran=False,
+                start_point=start_point,
+                start_value=start_value,
+                final_point=state.best_point.copy(),
+                final_value=float( state.best_value ),
+                evaluations_spent=0,
+                iterations=0,
+                exit_reason="invalid_seed",
+                kind=kind,
             )
         remaining = self._remaining_evaluations()
-        max_evaluations = int( self.agsls_config.final_polish_max_evaluations )
         if remaining is not None:
-            max_evaluations = min( max_evaluations, int( remaining ) )
+            max_evaluations = min( int( max_evaluations ), int( remaining ) )
         if max_evaluations < 5:
-            return self._store_final_polish_summary(
-                self._final_polish_summary(
-                    enabled=True,
-                    ran=False,
-                    start_point=start_point,
-                    start_value=start_value,
-                    final_point=state.best_point.copy(),
-                    final_value=float( state.best_value ),
-                    evaluations_spent=0,
-                    iterations=0,
-                    exit_reason="no_budget",
-                )
+            return self._final_polish_summary(
+                enabled=True,
+                ran=False,
+                start_point=start_point,
+                start_value=start_value,
+                final_point=state.best_point.copy(),
+                final_value=float( state.best_value ),
+                evaluations_spent=0,
+                iterations=0,
+                exit_reason="no_budget",
+                kind=kind,
             )
 
         lower = bounds[ :, 0 ]
@@ -1319,18 +1351,17 @@ class AdaptiveGridSmoothLifeSearch:
 
         gradient, failure = gradient_at( current_u )
         if gradient is None:
-            return self._store_final_polish_summary(
-                self._final_polish_summary(
-                    enabled=True,
-                    ran=spent > 0,
-                    start_point=start_point,
-                    start_value=start_value,
-                    final_point=state.best_point.copy(),
-                    final_value=float( state.best_value ),
-                    evaluations_spent=spent,
-                    iterations=iterations,
-                    exit_reason=failure or "invalid_gradient",
-                )
+            return self._final_polish_summary(
+                enabled=True,
+                ran=spent > 0,
+                start_point=start_point,
+                start_value=start_value,
+                final_point=state.best_point.copy(),
+                final_value=float( state.best_value ),
+                evaluations_spent=spent,
+                iterations=iterations,
+                exit_reason=failure or "invalid_gradient",
+                kind=kind,
             )
         while iterations < max_iterations:
             if np.linalg.norm( gradient ) <= gradient_tolerance:
@@ -1404,7 +1435,7 @@ class AdaptiveGridSmoothLifeSearch:
         state = self.engine.state
         if state is None:
             raise RuntimeError( "engine state missing" )
-        summary = self._final_polish_summary(
+        return self._final_polish_summary(
             enabled=True,
             ran=spent > 0,
             start_point=start_point,
@@ -1414,8 +1445,8 @@ class AdaptiveGridSmoothLifeSearch:
             evaluations_spent=spent,
             iterations=iterations,
             exit_reason=exit_reason,
+            kind=kind,
         )
-        return self._store_final_polish_summary( summary )
 
     def _mark_latest_snapshot(
         self,
@@ -1986,6 +2017,11 @@ class AdaptiveGridSmoothLifeSearch:
                 if state is None:
                     raise RuntimeError( "engine state missing" )
                 made_progress = int( state.evaluations ) > previous_evaluations or len( self.zoom_events ) > previous_zoom_count
+                if accepted and self.agsls_config.inter_zoom_polish_enabled:
+                    self._run_inter_zoom_polish()
+                    state = self.engine.state
+                    if state is None:
+                        raise RuntimeError( "engine state missing" )
                 if not accepted and not made_progress:
                     break
                 if eval_limit is None and decision_rounds >= max_rounds:
@@ -2014,6 +2050,7 @@ class AdaptiveGridSmoothLifeSearch:
                 "zoom_acceptance_count": int( self._accepted_zoom_count ),
                 "decision_trace": list( self._decision_trace ),
                 "final_polish": dict( final_polish_summary or { } ),
+                "inter_zoom_polish_history": [ dict( entry ) for entry in self._inter_zoom_polish_history ],
             },
         )
 

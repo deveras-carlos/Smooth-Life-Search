@@ -213,5 +213,95 @@ class TestFinalPolishRegression(unittest.TestCase):
         )
 
 
+class TestInterZoomPolish(unittest.TestCase):
+    """R7: inter-zoom FD-BFGS polish runs after each accepted zoom and
+    feeds AGSLS a precise incumbent for the next basin decision.
+    """
+
+    @staticmethod
+    def _run_rosenbrock(*, inter_zoom_enabled: bool, budget: int = 8000, seed: int = 7):
+        from smooth_life_search import (
+            AdaptiveGridSmoothLifeSearch,
+            SmoothLifeConfig,
+            rosenbrock,
+        )
+
+        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
+        smoothlife = SmoothLifeConfig(preset="search")
+        agsls = AGSLSConfig(
+            max_zoom_cycles=5,
+            max_evaluations=budget,
+            inter_zoom_polish_enabled=inter_zoom_enabled,
+        )
+        controller = AdaptiveGridSmoothLifeSearch(rosenbrock, bounds, smoothlife, agsls)
+        controller.reset(seed=seed)
+        return controller.run(evaluations=budget)
+
+    def test_runs_between_zooms(self) -> None:
+        run = self._run_rosenbrock(inter_zoom_enabled=True)
+        history = run.metadata.get("inter_zoom_polish_history") or []
+        # At least one entry per accepted zoom (some zooms may not have
+        # produced an incumbent change, but the polish always records).
+        self.assertGreaterEqual(len(history), len(run.zoom_events))
+        ran = [e for e in history if e.get("ran")]
+        self.assertGreater(len(ran), 0, msg="no inter-zoom polish actually ran")
+
+    def test_improves_running_incumbent(self) -> None:
+        """The first inter-zoom polish should always improve its seed
+        substantially: AGSLS's incumbent at zoom 0 is far from precise.
+        Later polishes may be no-ops once the incumbent converges, so we
+        only check the first.
+        """
+        run = self._run_rosenbrock(inter_zoom_enabled=True)
+        history = run.metadata.get("inter_zoom_polish_history") or []
+        ran = [e for e in history if e.get("ran")]
+        self.assertGreater(len(ran), 0)
+        first = ran[0]
+        start = float(first.get("start_value", float("inf")))
+        final = float(first.get("final_value", float("inf")))
+        self.assertLess(
+            final,
+            start - 1e-9,
+            msg=f"first polish did not improve: start={start} → final={final}",
+        )
+
+    def test_disabled_records_no_history(self) -> None:
+        run = self._run_rosenbrock(inter_zoom_enabled=False)
+        history = run.metadata.get("inter_zoom_polish_history") or []
+        self.assertEqual(history, [], msg="inter-zoom polish ran while disabled")
+
+    def test_respects_active_budget(self) -> None:
+        # Tight budget — total evaluations must never exceed it.
+        budget = 1500
+        run = self._run_rosenbrock(inter_zoom_enabled=True, budget=budget)
+        self.assertLessEqual(run.evaluations, budget)
+
+    def test_seed7_zoom_count_no_higher_than_r6(self) -> None:
+        """The R6-only run on seed=7 produced ~10 zooms before terminating.
+        With the inter-zoom polish anchoring the incumbent each round, AGSLS
+        should converge in fewer or equal zoom rounds.
+        """
+        run_off = self._run_rosenbrock(inter_zoom_enabled=False)
+        run_on = self._run_rosenbrock(inter_zoom_enabled=True)
+        self.assertLessEqual(
+            len(run_on.zoom_events),
+            len(run_off.zoom_events),
+            msg=f"R7 inter-zoom polish increased zoom count: on={len(run_on.zoom_events)} off={len(run_off.zoom_events)}",
+        )
+
+    def test_final_polish_kind_unchanged(self) -> None:
+        """R6 final polish must keep its 'fd_bfgs' kind tag (back-compat)."""
+        run = self._run_rosenbrock(inter_zoom_enabled=True)
+        final = run.metadata.get("final_polish") or {}
+        self.assertEqual(final.get("kind"), "fd_bfgs")
+
+    def test_inter_zoom_polish_kind_distinguishes(self) -> None:
+        """Inter-zoom polishes carry a distinct 'kind' tag."""
+        run = self._run_rosenbrock(inter_zoom_enabled=True)
+        history = run.metadata.get("inter_zoom_polish_history") or []
+        for entry in history:
+            self.assertEqual(entry.get("kind"), "fd_bfgs_inter_zoom")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -67,6 +67,8 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         max_evaluations=args.budget,
         final_polish_enabled=getattr(args, "final_polish_enabled", True),
         final_polish_max_evaluations=getattr(args, "final_polish_evaluations", 512),
+        inter_zoom_polish_enabled=getattr(args, "inter_zoom_polish_enabled", True),
+        inter_zoom_polish_max_evaluations=getattr(args, "inter_zoom_polish_evaluations", 64),
     )
     return bounds, smoothlife, agsls
 
@@ -190,6 +192,7 @@ def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
         "zoom_events": _zoom_payload(run),
         "snapshots": [_snapshot_payload(snapshot) for snapshot in run.snapshots],
         "final_polish": run.metadata.get("final_polish"),
+        "inter_zoom_polish_history": run.metadata.get("inter_zoom_polish_history") or [],
         "gif_path": gif_path,
     }
 
@@ -217,6 +220,7 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
         "bounds": result.bounds.tolist(),
         "zoom_events": _zoom_payload(result),
         "final_polish": result.metadata.get("final_polish"),
+        "inter_zoom_polish_history": result.metadata.get("inter_zoom_polish_history") or [],
         "gif_path": gif_path,
     }
 
@@ -480,6 +484,8 @@ def build_parser() -> argparse.ArgumentParser:
     agsls_shared.add_argument("--gamma-ramp-activation", type=float, default=0.3, help="Zoom fraction where --gamma-ramp begins.")
     agsls_shared.add_argument("--no-final-polish", dest="final_polish_enabled", action="store_false", default=True, help="Disable the bounded final local polish phase.")
     agsls_shared.add_argument("--final-polish-evaluations", type=int, default=512, help="Maximum objective evaluations for final local polish.")
+    agsls_shared.add_argument("--no-inter-zoom-polish", dest="inter_zoom_polish_enabled", action="store_false", default=True, help="Disable the inter-zoom bounded polish that runs after each accepted zoom.")
+    agsls_shared.add_argument("--inter-zoom-polish-evaluations", type=int, default=64, help="Maximum objective evaluations per inter-zoom local polish.")
 
     single = subparsers.add_parser("single", parents=[shared, agsls_shared], help="Run one AGSLS optimization job.")
     single.add_argument("--show-stages", action="store_true", help="Print per-zoom details.")
