@@ -10,12 +10,12 @@ class AGSLSConfig:
     """Policy parameters for adaptive basin zooming."""
 
     max_zoom_cycles: int = 5
-    initial_steps_per_zoom: int = 32
-    min_steps_per_zoom: int = 8
-    zoom_decay: float = 0.75
+    initial_steps_per_zoom: int = 96
+    min_steps_per_zoom: int = 32
+    zoom_decay: float = 0.2
     basin_quantile: float = 0.88
     min_basin_cells: int = 24
-    zoom_padding: float = 0.20
+    zoom_padding: float = 0.05
     min_side_fraction: float = 1e-64
     max_evaluations: int | None = None
     zoom_cycles_budget_baseline: int | None = 800
@@ -32,7 +32,7 @@ class AGSLSConfig:
     similarity_margin: float = 0.05
     undecided_stage_max_evaluations: int = 64
     candidate_probe_evaluations: int = 16
-    basin_envelope_quantile_offset: float = 0.08
+    basin_envelope_quantile_offset: float = 0.01
     basin_envelope_growth_pixels: int = 1
     min_zoom_cells: int = 6
     incumbent_overlap_bonus: float = 0.20
@@ -40,7 +40,7 @@ class AGSLSConfig:
     edge_risk_fraction: float = 0.20
     late_stage_zoom_fraction_threshold: float = 0.60
     late_stage_plateau_threshold: float = 1e-4
-    late_stage_min_shrink_ratio: float = 0.85
+    late_stage_min_shrink_ratio: float = 0.95
     late_stage_max_rounds: int = 2
     late_stage_eval_batch: int = 8
     late_stage_elite_k: int = 4
@@ -61,8 +61,8 @@ class AGSLSConfig:
     late_stage_periodic_local_search_max_iterations: int = 12
     late_stage_periodic_local_search_max_evaluations: int = 48
     late_stage_pattern_search_initial_step_fraction: float = 0.15
-    late_stage_pattern_search_min_step_fraction: float = 0.005
-    late_stage_pattern_search_shrink: float = 0.5
+    late_stage_pattern_search_min_step_fraction: float = 0.00005
+    late_stage_pattern_search_shrink: float = 0.05
     late_stage_pattern_search_max_iterations: int = 12
     late_stage_pattern_search_max_evaluations: int = 20
     late_stage_pattern_search_reuse_tolerance_cells: float = 0.5
@@ -70,6 +70,14 @@ class AGSLSConfig:
     final_polish_max_evaluations: int = 512
     inter_zoom_polish_enabled: bool = True
     inter_zoom_polish_max_evaluations: int = 64
+    polish_gradient_tolerance: float = 1e-10
+    polish_finite_difference_step: float = 1e-7
+    polish_iterative_refinement_passes: int = 2
+    polish_iterative_refinement_shrink: float = 0.01
+    time_phased_enabled: bool = False
+    phase_explore_end_fraction: float = 0.20
+    phase_commit_end_fraction: float = 0.80
+    explore_phase_smoothlife_steps: int = 16
 
     def __post_init__(self) -> None:
         if self.max_zoom_cycles <= 0:
@@ -168,3 +176,15 @@ class AGSLSConfig:
             raise ValueError("final_polish_max_evaluations must be positive")
         if self.inter_zoom_polish_max_evaluations <= 0:
             raise ValueError("inter_zoom_polish_max_evaluations must be positive")
+        if not 0.0 < self.polish_gradient_tolerance:
+            raise ValueError("polish_gradient_tolerance must be positive")
+        if not 0.0 < self.polish_finite_difference_step:
+            raise ValueError("polish_finite_difference_step must be positive")
+        if self.polish_iterative_refinement_passes < 0:
+            raise ValueError("polish_iterative_refinement_passes must be non-negative")
+        if not 0.0 < self.polish_iterative_refinement_shrink < 1.0:
+            raise ValueError("polish_iterative_refinement_shrink must be in (0, 1)")
+        if not 0.0 < self.phase_explore_end_fraction < self.phase_commit_end_fraction < 1.0:
+            raise ValueError("require 0 < phase_explore_end_fraction < phase_commit_end_fraction < 1")
+        if self.explore_phase_smoothlife_steps <= 0:
+            raise ValueError("explore_phase_smoothlife_steps must be positive")

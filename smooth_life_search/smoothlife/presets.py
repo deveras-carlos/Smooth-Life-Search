@@ -36,7 +36,7 @@ PRESET_BUILDERS: dict[str, SmoothLifeConfig] = {
         objective_coupling=0.30,
         run_mode="search",
     ),
-    "search_exploit": SmoothLifeConfig(
+    "time_phased": SmoothLifeConfig(
         birth_low=0.278,
         birth_high=0.365,
         death_low=0.267,
@@ -49,7 +49,7 @@ PRESET_BUILDERS: dict[str, SmoothLifeConfig] = {
         diffusion=0.10,
         objective_coupling=0.30,
         objective_gamma=1.0,
-        support_ema_alpha=0.30,
+        support_ema_alpha=0.05,
         subpixel_best_point=True,
         subpixel_confirm=True,
         subpixel_confirm_candidates=3,

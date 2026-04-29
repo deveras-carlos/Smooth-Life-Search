@@ -562,7 +562,7 @@ class TestAGSLS( unittest.TestCase ):
             rosenbrock,
             bounds=[ ( -10.0, 10.0 ), ( -10.0, 10.0 ) ],
             smoothlife_config=SmoothLifeConfig( grid_shape=( 24, 24 ), evaluations_per_step=4, snapshot_interval=1, preset="search" ),
-            agsls_config=AGSLSConfig( final_polish_max_evaluations=100, max_evaluations=1000 ),
+            agsls_config=AGSLSConfig( final_polish_max_evaluations=100, max_evaluations=1000, polish_iterative_refinement_passes=0 ),
         )
         search.reset( seed=12 )
         state = search.engine.state

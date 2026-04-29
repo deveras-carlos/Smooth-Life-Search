@@ -420,10 +420,22 @@ class AdaptiveGridSmoothLifeSearch:
     def _late_stage_state( self, *, box_id: int, active_limit: int, bounds: np.ndarray ) -> dict[ str, float | int | bool ]:
         signals = self.runtime_signals()
         zoom_fraction = signals.zoom_fraction()
+        rounds = int( self._late_stage_round_counts.get( box_id, 0 ) )
+        if self.agsls_config.time_phased_enabled:
+            budget_fraction = signals.budget_fraction()
+            late = budget_fraction >= float( self.agsls_config.phase_commit_end_fraction )
+            return {
+                "zoom_fraction": float( zoom_fraction ),
+                "budget_fraction": float( budget_fraction ),
+                "plateau": False,
+                "small_box": False,
+                "late": bool( late ),
+                "intensification_rounds": rounds,
+                "late_stage_mode": bool( late or rounds > 0 ),
+            }
         prior_box_rounds = int( self._box_round_counts.get( box_id, 0 ) )
         plateau = prior_box_rounds > 0 and max( float( signals.global_improvement ), float( signals.stage_improvement ) ) <= self.agsls_config.late_stage_plateau_threshold
         small_box = self._box_area_ratio( bounds ) <= 0.1
-        rounds = int( self._late_stage_round_counts.get( box_id, 0 ) )
         late = zoom_fraction >= self.agsls_config.late_stage_zoom_fraction_threshold
         return {
             "zoom_fraction": float( zoom_fraction ),
@@ -1298,10 +1310,12 @@ class AdaptiveGridSmoothLifeSearch:
         spent = 0
         iterations = 0
         exit_reason = "max_iterations"
-        finite_difference_step = 1e-5
-        gradient_tolerance = 1e-8
+        finite_difference_step = float( self.agsls_config.polish_finite_difference_step )
+        gradient_tolerance = float( self.agsls_config.polish_gradient_tolerance )
+        refinement_shrink = float( self.agsls_config.polish_iterative_refinement_shrink )
+        refinement_remaining = int( self.agsls_config.polish_iterative_refinement_passes )
         minimum_direction_norm = 1e-12
-        max_iterations = max( 1, min( 64, max_evaluations // 5 ) )
+        max_iterations = max( 1, max_evaluations // 5 )
 
         def to_world( normalized: np.ndarray ) -> np.ndarray:
             return lower + np.clip( np.asarray( normalized, dtype=float ), 0.0, 1.0 ) * widths
@@ -1363,74 +1377,91 @@ class AdaptiveGridSmoothLifeSearch:
                 exit_reason=failure or "invalid_gradient",
                 kind=kind,
             )
-        while iterations < max_iterations:
-            if np.linalg.norm( gradient ) <= gradient_tolerance:
-                exit_reason = "gradient_converged"
-                break
-            direction = -inverse_hessian.dot( gradient )
-            if not np.all( np.isfinite( direction ) ) or float( np.dot( gradient, direction ) ) >= 0.0:
-                inverse_hessian = np.eye( 2, dtype=float )
-                direction = -gradient
-            max_component = float( np.max( np.abs( direction ) ) )
-            if max_component <= minimum_direction_norm:
-                exit_reason = "gradient_converged"
-                break
-            if max_component > 0.25:
-                direction = direction * ( 0.25 / max_component )
-            descent = float( np.dot( gradient, direction ) )
-            accepted_u: np.ndarray | None = None
-            accepted_value: float | None = None
-            accepted_loss: float | None = None
-            alpha = 1.0
-            budget_limited = False
-            while alpha >= 1e-12:
-                trial_u = np.clip( current_u + alpha * direction, 0.0, 1.0 )
-                if np.allclose( trial_u, current_u, atol=1e-15, rtol=0.0 ):
+        while True:
+            inner_exit = "max_iterations"
+            while iterations < max_iterations:
+                if np.linalg.norm( gradient ) <= gradient_tolerance:
+                    inner_exit = "gradient_converged"
+                    break
+                direction = -inverse_hessian.dot( gradient )
+                if not np.all( np.isfinite( direction ) ) or float( np.dot( gradient, direction ) ) >= 0.0:
+                    inverse_hessian = np.eye( 2, dtype=float )
+                    direction = -gradient
+                max_component = float( np.max( np.abs( direction ) ) )
+                if max_component <= minimum_direction_norm:
+                    inner_exit = "gradient_converged"
+                    break
+                if max_component > 0.25:
+                    direction = direction * ( 0.25 / max_component )
+                descent = float( np.dot( gradient, direction ) )
+                accepted_u: np.ndarray | None = None
+                accepted_value: float | None = None
+                accepted_loss: float | None = None
+                alpha = 1.0
+                budget_limited = False
+                while alpha >= 1e-12:
+                    trial_u = np.clip( current_u + alpha * direction, 0.0, 1.0 )
+                    if np.allclose( trial_u, current_u, atol=1e-15, rtol=0.0 ):
+                        alpha *= 0.5
+                        continue
+                    values = evaluate_points( trial_u.reshape( 1, 2 ) )
+                    if values is None:
+                        budget_limited = True
+                        break
+                    trial_value = float( values[ 0 ] )
+                    trial_loss = self._final_polish_loss( trial_value )
+                    if trial_loss <= current_loss + 1e-4 * alpha * descent or trial_loss < current_loss:
+                        accepted_u = trial_u
+                        accepted_value = trial_value
+                        accepted_loss = trial_loss
+                        break
                     alpha *= 0.5
-                    continue
-                values = evaluate_points( trial_u.reshape( 1, 2 ) )
-                if values is None:
-                    budget_limited = True
+                if accepted_u is None or accepted_value is None or accepted_loss is None:
+                    inner_exit = "budget_limit" if budget_limited else "line_search_failed"
                     break
-                trial_value = float( values[ 0 ] )
-                trial_loss = self._final_polish_loss( trial_value )
-                if trial_loss <= current_loss + 1e-4 * alpha * descent or trial_loss < current_loss:
-                    accepted_u = trial_u
-                    accepted_value = trial_value
-                    accepted_loss = trial_loss
+                next_gradient, failure = gradient_at( accepted_u )
+                iterations += 1
+                step = accepted_u - current_u
+                if next_gradient is None:
+                    current_u = accepted_u
+                    current_value = accepted_value
+                    current_loss = accepted_loss
+                    inner_exit = failure or "budget_limit"
                     break
-                alpha *= 0.5
-            if accepted_u is None or accepted_value is None or accepted_loss is None:
-                exit_reason = "budget_limit" if budget_limited else "line_search_failed"
-                break
-            next_gradient, failure = gradient_at( accepted_u )
-            iterations += 1
-            step = accepted_u - current_u
-            if next_gradient is None:
+                y = next_gradient - gradient
+                curvature = float( np.dot( y, step ) )
+                if curvature > 1e-14 and np.isfinite( curvature ):
+                    rho = 1.0 / curvature
+                    identity = np.eye( 2, dtype=float )
+                    inverse_hessian = (
+                        ( identity - rho * np.outer( step, y ) )
+                        @ inverse_hessian
+                        @ ( identity - rho * np.outer( y, step ) )
+                        + rho * np.outer( step, step )
+                    )
+                else:
+                    inverse_hessian = np.eye( 2, dtype=float )
                 current_u = accepted_u
                 current_value = accepted_value
                 current_loss = accepted_loss
-                exit_reason = failure or "budget_limit"
+                gradient = next_gradient
+            exit_reason = inner_exit
+            if inner_exit != "gradient_converged":
                 break
-            y = next_gradient - gradient
-            curvature = float( np.dot( y, step ) )
-            if curvature > 1e-14 and np.isfinite( curvature ):
-                rho = 1.0 / curvature
-                identity = np.eye( 2, dtype=float )
-                inverse_hessian = (
-                    ( identity - rho * np.outer( step, y ) )
-                    @ inverse_hessian
-                    @ ( identity - rho * np.outer( y, step ) )
-                    + rho * np.outer( step, step )
-                )
-            else:
-                inverse_hessian = np.eye( 2, dtype=float )
-            current_u = accepted_u
-            current_value = accepted_value
-            current_loss = accepted_loss
-            gradient = next_gradient
-        else:
-            exit_reason = "max_iterations"
+            if refinement_remaining <= 0:
+                break
+            if max_evaluations - spent < 8:
+                break
+            refinement_remaining -= 1
+            finite_difference_step *= refinement_shrink
+            gradient_tolerance *= refinement_shrink
+            max_iterations += max( 1, max_iterations // 2 )
+            inverse_hessian = np.eye( 2, dtype=float )
+            refined_gradient, refined_failure = gradient_at( current_u )
+            if refined_gradient is None:
+                exit_reason = refined_failure or "refinement_gradient_failed"
+                break
+            gradient = refined_gradient
 
         state = self.engine.state
         if state is None:
@@ -1982,6 +2013,34 @@ class AdaptiveGridSmoothLifeSearch:
         )
         return True
 
+    def _run_explore_phase( self, eval_limit: int | None ) -> None:
+        """R8 explore phase: run SmoothLife steps without zooming until
+        ``budget_fraction`` reaches ``phase_explore_end_fraction``.
+
+        No-op when ``time_phased_enabled`` is False or no eval budget is set.
+        """
+
+        if not self.agsls_config.time_phased_enabled:
+            return
+        if eval_limit is None:
+            return
+        explore_end = float( self.agsls_config.phase_explore_end_fraction )
+        steps_per_tick = int( self.agsls_config.explore_phase_smoothlife_steps )
+        while True:
+            state = self.engine.state
+            if state is None:
+                raise RuntimeError( "engine state missing" )
+            if int( state.evaluations ) >= int( eval_limit ):
+                break
+            signals = self.engine.runtime_signals()
+            if signals.budget_fraction() >= explore_end:
+                break
+            previous_evaluations = int( state.evaluations )
+            self.engine.step( steps_per_tick )
+            state = self.engine.state
+            if state is None or int( state.evaluations ) <= previous_evaluations:
+                break
+
     def run( self, zoom_cycles: int | None = None, evaluations: int | None = None ) -> SearchRun:
         """Run AGSLS until the zoom or evaluation limit is reached."""
 
@@ -1996,6 +2055,7 @@ class AdaptiveGridSmoothLifeSearch:
         max_rounds = max( limit * 4, limit )
         final_polish_summary: dict[ str, object ] | None = None
         try:
+            self._run_explore_phase( eval_limit )
             while len( self.zoom_events ) < limit:
                 state = self.engine.state
                 if state is None:

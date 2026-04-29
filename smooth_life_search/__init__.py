@@ -7,6 +7,7 @@ from .core import (
     build_ema_alpha_ramp_policy,
     build_gamma_ramp_policy,
     build_kernel_shrink_policy,
+    build_time_phased_policy,
     combine_schedule_policies,
 )
 from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
@@ -44,6 +45,7 @@ __all__ = [
     "build_ema_alpha_ramp_policy",
     "build_gamma_ramp_policy",
     "build_kernel_shrink_policy",
+    "build_time_phased_policy",
     "combine_schedule_policies",
     "griewank",
     "himmelblau",

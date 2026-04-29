@@ -19,6 +19,7 @@ from .. import (
     StudySpec,
     build_gamma_ramp_policy,
     build_kernel_shrink_policy,
+    build_time_phased_policy,
     combine_schedule_policies,
     open_run_viewer,
     run_exploitation_study,
@@ -69,6 +70,7 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         final_polish_max_evaluations=getattr(args, "final_polish_evaluations", 512),
         inter_zoom_polish_enabled=getattr(args, "inter_zoom_polish_enabled", True),
         inter_zoom_polish_max_evaluations=getattr(args, "inter_zoom_polish_evaluations", 64),
+        time_phased_enabled=getattr(args, "preset", None) == "time_phased",
     )
     return bounds, smoothlife, agsls
 
@@ -87,16 +89,25 @@ def _maybe_build_kernel_policy(args: argparse.Namespace, smoothlife: SmoothLifeC
 
 def _maybe_build_gamma_policy(args: argparse.Namespace) -> SchedulePolicy | None:
     gamma_end = getattr(args, "gamma_ramp", None)
-    if gamma_end is None and getattr(args, "preset", None) == "search_exploit":
-        gamma_end = 1.25
     if gamma_end is None:
         return None
     activation = float(getattr(args, "gamma_ramp_activation", 0.3))
     return build_gamma_ramp_policy(end=float(gamma_end), activation_zoom_fraction=activation)
 
 
+def _maybe_build_time_phased_policy(args: argparse.Namespace, smoothlife: SmoothLifeConfig) -> SchedulePolicy | None:
+    if getattr(args, "preset", None) != "time_phased":
+        return None
+    return build_time_phased_policy(
+        inner_radius=smoothlife.inner_radius,
+        outer_radius=smoothlife.outer_radius,
+        anti_alias_radius=smoothlife.anti_alias_radius,
+    )
+
+
 def _runtime_policy_from_args(args: argparse.Namespace, smoothlife: SmoothLifeConfig) -> SchedulePolicy | None:
     return combine_schedule_policies(
+        _maybe_build_time_phased_policy(args, smoothlife),
         _maybe_build_gamma_policy(args),
         _maybe_build_kernel_policy(args, smoothlife),
     )
