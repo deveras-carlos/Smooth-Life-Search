@@ -46,6 +46,47 @@ def laplacian(field: np.ndarray) -> np.ndarray:
     return 0.25 * neighbor_sum - field
 
 
+def _bilinear_sample_clipped(field: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    height, width = field.shape
+    clipped_rows = np.clip(rows, 0.0, float(height - 1))
+    clipped_cols = np.clip(cols, 0.0, float(width - 1))
+    row0 = np.floor(clipped_rows).astype(int)
+    col0 = np.floor(clipped_cols).astype(int)
+    row1 = np.minimum(row0 + 1, height - 1)
+    col1 = np.minimum(col0 + 1, width - 1)
+    row_weight = clipped_rows - row0
+    col_weight = clipped_cols - col0
+    top = (1.0 - col_weight) * field[row0, col0] + col_weight * field[row0, col1]
+    bottom = (1.0 - col_weight) * field[row1, col0] + col_weight * field[row1, col1]
+    return (1.0 - row_weight) * top + row_weight * bottom
+
+
+def objective_drift_field(field: np.ndarray, objective_field: np.ndarray, config: SmoothLifeConfig) -> np.ndarray:
+    """Advect the signed field slightly up the objective-support gradient."""
+
+    strength = float(config.objective_drift_strength)
+    clip = float(config.objective_drift_clip)
+    if strength <= 0.0 or clip <= 0.0 or config.run_mode == "simulation":
+        return field
+    support = np.asarray(objective_field, dtype=float)
+    if support.shape != field.shape or not np.any(np.isfinite(support)):
+        return field
+    support = np.nan_to_num(support, nan=0.5, posinf=1.0, neginf=0.0)
+    grad_y, grad_x = np.gradient(support)
+    norm = np.hypot(grad_y, grad_x)
+    if float(np.max(norm)) <= 1e-15:
+        return field
+    velocity_y = np.divide(grad_y, norm, out=np.zeros_like(grad_y), where=norm > 1e-15)
+    velocity_x = np.divide(grad_x, norm, out=np.zeros_like(grad_x), where=norm > 1e-15)
+    height, width = field.shape
+    rows, cols = np.indices(field.shape, dtype=float)
+    departure_rows = rows - strength * velocity_y
+    departure_cols = cols - strength * velocity_x
+    advected = _bilinear_sample_clipped(np.asarray(field, dtype=float), departure_rows, departure_cols)
+    delta = np.clip(advected - field, -clip, clip)
+    return np.clip(field + delta, config.field_floor, config.field_ceiling)
+
+
 def refresh_dynamics_fields(
     field: np.ndarray,
     objective_field: np.ndarray,

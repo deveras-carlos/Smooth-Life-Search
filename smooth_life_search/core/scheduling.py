@@ -1,4 +1,4 @@
-"""Adaptive runtime scheduling for SmoothLife and AGSLS parameters."""
+"""Optional runtime scheduling for SmoothLife parameters."""
 
 from __future__ import annotations
 
@@ -18,30 +18,6 @@ SMOOTHLIFE_PER_STEP_FIELDS = frozenset(
     }
 )
 
-AGSLS_PER_DECISION_FIELDS = frozenset(
-    {
-        "initial_steps_per_zoom",
-        "min_steps_per_zoom",
-        "zoom_decay",
-        "basin_quantile",
-        "alive_core_threshold",
-        "min_alive_density",
-        "min_basin_cells",
-        "zoom_padding",
-        "mass_weight",
-        "alive_density_weight",
-        "objective_weight",
-        "stability_weight",
-        "area_penalty",
-        "dominance_margin",
-        "similarity_margin",
-        "undecided_stage_max_evaluations",
-        "candidate_probe_evaluations",
-        "polish_gradient_tolerance",
-        "polish_finite_difference_step",
-    }
-)
-
 ZOOM_BOUNDARY_FIELDS = frozenset(
     {
         "birth_low",
@@ -53,8 +29,6 @@ ZOOM_BOUNDARY_FIELDS = frozenset(
         "inner_radius",
         "outer_radius",
         "anti_alias_radius",
-        "cluster_eps_pixels",
-        "cluster_min_samples",
     }
 )
 
@@ -71,9 +45,6 @@ RUN_CONSTANT_FIELDS = frozenset(
         "maximize",
         "preset",
         "store_all_snapshots",
-        "min_side_fraction",
-        "max_evaluations",
-        "max_zoom_cycles",
     }
 )
 
@@ -86,7 +57,6 @@ SCHEDULE_MODES = frozenset(
         "budget_sigmoid",
         "plateau_reactive",
         "decision_gap_reactive",
-        "late_stage_reactive",
     }
 )
 
@@ -234,12 +204,6 @@ class FieldSchedule:
                 return _coerce_like(self.base_value, float(self.high_value))
             if self.low_value is not None:
                 return _coerce_like(self.base_value, float(self.low_value))
-            return self.base_value
-        if self.mode == "late_stage_reactive":
-            late = signals.zoom_fraction() >= self.zoom_fraction_threshold
-            plateau = max(float(signals.global_improvement), float(signals.stage_improvement)) <= self.plateau_threshold
-            if (late or plateau) and self.high_value is not None:
-                return _coerce_like(self.base_value, float(self.high_value))
             return self.base_value
         raise RuntimeError(f"unsupported schedule mode: {self.mode}")
 
@@ -411,11 +375,7 @@ def build_ema_alpha_ramp_policy(
 
     In the EMA update ``ema = (1-α) * ema + α * support``, a large α tracks the
     current support quickly (responsive, little smoothing) and a small α
-    preserves history (heavy smoothing). The default ramp goes from a large
-    responsive α early — so early-zoom basin detection follows the freshly
-    bootstrapped support signal — to a small smoothing α late, filtering
-    step-to-step support flicker that otherwise drives seed variance in
-    late-stage basin decisions.
+    preserves history (heavy smoothing).
     """
 
     if not 0.0 <= start <= 1.0:
@@ -437,104 +397,6 @@ def build_ema_alpha_ramp_policy(
         ),
         family="support_ema_alpha",
         schedule_kind="zoom_linear",
-    )
-
-
-def build_time_phased_policy(
-    *,
-    inner_radius: float,
-    outer_radius: float,
-    anti_alias_radius: float | None = None,
-    gamma_start: float = 1.0,
-    gamma_end: float = 1.5,
-    ema_alpha_start: float = 0.05,
-    ema_alpha_end: float = 0.30,
-    zoom_padding_start: float = 1e-32,
-    zoom_padding_end: float = 1e-64,
-    dominance_margin_start: float = 0.30,
-    dominance_margin_end: float = 1e-12,
-    kernel_end_scale: float = 0.7,
-    polish_gradient_tolerance_start: float = 1e-8,
-    polish_gradient_tolerance_end: float = 1e-10,
-    polish_finite_difference_step_start: float = 1e-5,
-    polish_finite_difference_step_end: float = 1e-6,
-) -> "SchedulePolicy":
-    """Construct a budget-fraction policy that ramps the AGSLS 'scale' knobs
-    along ``budget_fraction`` for the R8 time-phased strategy.
-
-    All schedules use ``budget_sigmoid`` so the transition is smooth and
-    centered at ``budget_fraction = 0.5`` (the midpoint of the commit phase
-    when the default 0.30/0.70 phase boundaries are used). Knobs that imply
-    "more local search" ramp toward their tighter end-of-run values.
-    """
-
-    if inner_radius <= 0.0 or outer_radius <= inner_radius:
-        raise ValueError("require 0 < inner_radius < outer_radius")
-    if not 0.0 < kernel_end_scale <= 1.0:
-        raise ValueError("kernel_end_scale must be in (0, 1]")
-    schedules: list[FieldSchedule] = [
-        FieldSchedule(
-            field_name="objective_gamma",
-            mode="budget_sigmoid",
-            base_value=float(gamma_start),
-            low_value=float(gamma_start),
-            high_value=float(gamma_end),
-        ),
-        FieldSchedule(
-            field_name="support_ema_alpha",
-            mode="budget_sigmoid",
-            base_value=float(ema_alpha_start),
-            low_value=float(ema_alpha_start),
-            high_value=float(ema_alpha_end),
-        ),
-        FieldSchedule(
-            field_name="zoom_padding",
-            mode="budget_sigmoid",
-            base_value=float(zoom_padding_start),
-            low_value=float(zoom_padding_start),
-            high_value=float(zoom_padding_end),
-        ),
-        FieldSchedule(
-            field_name="dominance_margin",
-            mode="budget_sigmoid",
-            base_value=float(dominance_margin_start),
-            low_value=float(dominance_margin_start),
-            high_value=float(dominance_margin_end),
-        ),
-        FieldSchedule(
-            field_name="inner_radius",
-            mode="budget_sigmoid",
-            base_value=float(inner_radius),
-            low_value=float(inner_radius),
-            high_value=float(inner_radius) * float(kernel_end_scale),
-        ),
-        FieldSchedule(
-            field_name="outer_radius",
-            mode="budget_sigmoid",
-            base_value=float(outer_radius),
-            low_value=float(outer_radius),
-            high_value=float(outer_radius) * float(kernel_end_scale),
-        ),
-    ]
-    if anti_alias_radius is not None:
-        schedules.append(
-            FieldSchedule(
-                field_name="anti_alias_radius",
-                mode="budget_sigmoid",
-                base_value=float(anti_alias_radius),
-                low_value=float(anti_alias_radius),
-                high_value=max(0.5, float(anti_alias_radius) * float(kernel_end_scale)),
-            )
-        )
-    # Polish tolerances: schedules omitted by default — pushing the polish below
-    # the FD noise floor causes BFGS to chase noisy gradients. Iterative
-    # refinement (config: polish_iterative_refinement_passes) is the better
-    # mechanism for tightening polish when its gradient_converged exit signals
-    # the algorithm is in a regime where tighter tolerances would help.
-    return SchedulePolicy(
-        schedules=tuple(schedules),
-        family="time_phased",
-        schedule_kind="budget_sigmoid",
     )
 
 
@@ -562,7 +424,6 @@ def combine_schedule_policies(*policies: "SchedulePolicy | None") -> "SchedulePo
 
 
 __all__ = [
-    "AGSLS_PER_DECISION_FIELDS",
     "FieldSchedule",
     "KERNEL_PARAMETER_FIELDS",
     "RUN_CONSTANT_FIELDS",
@@ -575,6 +436,5 @@ __all__ = [
     "build_ema_alpha_ramp_policy",
     "build_gamma_ramp_policy",
     "build_kernel_shrink_policy",
-    "build_time_phased_policy",
     "combine_schedule_policies",
 ]

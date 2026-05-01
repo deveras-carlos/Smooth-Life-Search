@@ -1,525 +1,591 @@
-"""Tests for AGSLS bound-construction (R5: incumbent containment with re-expansion)."""
-
 from __future__ import annotations
 
 import unittest
 
 import numpy as np
 
-from smooth_life_search import AGSLSConfig
-from smooth_life_search.agsls.geometry import finalize_zoom_bounds
+from smooth_life_search import AGSLSConfig, AdaptiveGridSmoothLifeSearch, Basin, SmoothLifeConfig, sphere
+from smooth_life_search.agsls.scoring import score_basins
+from smooth_life_search.smoothlife.evaluation import evaluation_points
 
 
-def _bounds(x_low: float, x_high: float, y_low: float, y_high: float) -> np.ndarray:
-    return np.asarray([[x_low, x_high], [y_low, y_high]], dtype=float)
-
-
-def _config(**overrides: float | int) -> AGSLSConfig:
-    base = AGSLSConfig(
-        max_zoom_cycles=5,
-        zoom_padding=0.0,
-        min_side_fraction=1e-64,
-        edge_risk_fraction=0.05,
-        min_zoom_cells=2,
+def _basin(
+    *,
+    support_mass: float,
+    alive_density: float,
+    objective_score: float,
+    bbox: np.ndarray | None = None,
+) -> Basin:
+    mask = np.ones((4, 4), dtype=bool)
+    bbox_world = np.asarray([[0.0, 1.0], [0.0, 1.0]], dtype=float) if bbox is None else bbox
+    return Basin(
+        mask=mask,
+        centroid_grid=np.asarray([1.5, 1.5], dtype=float),
+        centroid_world=np.asarray(
+            [0.5 * (bbox_world[0, 0] + bbox_world[0, 1]), 0.5 * (bbox_world[1, 0] + bbox_world[1, 1])],
+            dtype=float,
+        ),
+        bbox_grid=(0, 0, 3, 3),
+        bbox_world=bbox_world,
+        support_mass=support_mass,
+        objective_score=objective_score,
+        stability_score=0.5,
+        alive_density=alive_density,
+        basin_best_point=np.mean(bbox_world, axis=1),
+        basin_best_value=objective_score,
+        evaluated_count=4,
+        best_objective_score=objective_score,
+        mean_objective_score=objective_score,
     )
-    for key, value in overrides.items():
-        setattr(base, key, value)
-    return base
 
 
-class TestFinalizeZoomBounds(unittest.TestCase):
-    """Geometry-level tests for `finalize_zoom_bounds` after the R5 fix."""
+def _matching_grid_basin(
+    shape: tuple[int, int],
+    bounds: np.ndarray,
+    values: np.ndarray,
+    bbox_grid: tuple[int, int, int, int] | None = None,
+) -> Basin:
+    if bbox_grid is None:
+        bbox_grid = (0, 0, shape[0] - 1, shape[1] - 1)
+    row_min, col_min, row_max, col_max = bbox_grid
+    mask = np.zeros(shape, dtype=bool)
+    mask[row_min : row_max + 1, col_min : col_max + 1] = True
+    masked_values = np.where(mask, values, np.inf)
+    flat = int(np.argmin(masked_values))
+    row, col = np.unravel_index(flat, shape)
+    mask_rows, mask_cols = np.nonzero(mask)
+    mask_points = evaluation_points(mask_rows, mask_cols, bounds, shape)
+    best_point = evaluation_points(
+        np.asarray([row], dtype=int),
+        np.asarray([col], dtype=int),
+        bounds,
+        shape,
+    )[0]
+    height, width = shape
+    bbox_world = np.asarray(
+        [
+            [
+                bounds[0, 0] + (col_min / width) * (bounds[0, 1] - bounds[0, 0]),
+                bounds[0, 0] + ((col_max + 1) / width) * (bounds[0, 1] - bounds[0, 0]),
+            ],
+            [
+                bounds[1, 0] + (row_min / height) * (bounds[1, 1] - bounds[1, 0]),
+                bounds[1, 0] + ((row_max + 1) / height) * (bounds[1, 1] - bounds[1, 0]),
+            ],
+        ],
+        dtype=float,
+    )
+    return Basin(
+        mask=mask,
+        centroid_grid=np.asarray([np.mean(mask_rows), np.mean(mask_cols)], dtype=float),
+        centroid_world=np.mean(mask_points, axis=0),
+        bbox_grid=bbox_grid,
+        bbox_world=bbox_world,
+        support_mass=float(np.count_nonzero(mask)),
+        objective_score=1.0,
+        stability_score=1.0,
+        alive_density=1.0,
+        basin_best_point=best_point,
+        basin_best_value=float(values[row, col]),
+        evaluated_count=int(values.size),
+        best_objective_score=1.0,
+        mean_objective_score=0.5,
+    )
 
-    def test_no_incumbent_keeps_bounds_inside_current(self) -> None:
-        original = _bounds(-5.0, 5.0, -5.0, 5.0)
-        current = _bounds(-2.0, 2.0, -2.0, 2.0)
-        proposed = _bounds(-1.0, 1.0, -1.0, 1.0)
-        result = finalize_zoom_bounds(
-            proposed,
-            np.array([0.0, 0.0]),
-            current,
-            original,
-            grid_shape=(64, 64),
-            config=_config(),
-        )
-        self.assertTrue(np.all(result[:, 0] >= current[:, 0] - 1e-12))
-        self.assertTrue(np.all(result[:, 1] <= current[:, 1] + 1e-12))
 
-    def test_incumbent_inside_current_but_outside_proposed_pulls_bounds_in(self) -> None:
-        original = _bounds(-5.0, 5.0, -5.0, 5.0)
-        current = _bounds(-2.0, 2.0, -2.0, 2.0)
-        proposed = _bounds(0.5, 1.5, 0.5, 1.5)
-        incumbent = np.array([0.0, 0.0])
-        result = finalize_zoom_bounds(
-            proposed,
-            np.array([1.0, 1.0]),
-            current,
-            original,
-            grid_shape=(64, 64),
-            config=_config(),
-            incumbent_point=incumbent,
-        )
-        self.assertLessEqual(result[0, 0], incumbent[0] + 1e-12)
-        self.assertLessEqual(result[1, 0], incumbent[1] + 1e-12)
-
-    def test_incumbent_outside_current_re_expands_to_original(self) -> None:
-        """The R5 fix: if a previous zoom cropped the optimum out of current_bounds,
-        a new bound construction with the incumbent passed in must re-expand the
-        offending axis up to original_bounds.
-        """
-
-        original = _bounds(-5.0, 5.0, -5.0, 5.0)
-        current = _bounds(-2.0, 2.0, 1.14, 2.0)  # y was cropped to [1.14, 2.0]
-        proposed = _bounds(-1.0, 1.0, 1.5, 1.9)  # basin lives high in y
-        incumbent = np.array([1.0, 1.0])  # true optimum below current y_low
-        result = finalize_zoom_bounds(
-            proposed,
-            np.array([0.0, 1.7]),
-            current,
-            original,
-            grid_shape=(64, 64),
-            config=_config(),
-            incumbent_point=incumbent,
-        )
-        # Pre-R5: result[1, 0] would have been clipped at 1.14 (cropped optimum).
-        # Post-R5: result[1, 0] should drop to or below incumbent[1] = 1.0.
-        self.assertLessEqual(result[1, 0], incumbent[1] + 1e-9)
-        # And it must remain inside original_bounds.
-        self.assertGreaterEqual(result[1, 0], original[1, 0] - 1e-12)
-
-    def test_incumbent_outside_original_is_skipped_defensively(self) -> None:
-        original = _bounds(-5.0, 5.0, -5.0, 5.0)
-        current = _bounds(-2.0, 2.0, -2.0, 2.0)
-        proposed = _bounds(-1.0, 1.0, -1.0, 1.0)
-        far_incumbent = np.array([10.0, 10.0])  # outside original
-        result = finalize_zoom_bounds(
-            proposed,
-            np.array([0.0, 0.0]),
-            current,
-            original,
-            grid_shape=(64, 64),
-            config=_config(),
-            incumbent_point=far_incumbent,
-        )
-        # Defensive: a pathological out-of-original incumbent should not warp the bounds.
-        self.assertTrue(np.all(result[:, 0] >= original[:, 0] - 1e-12))
-        self.assertTrue(np.all(result[:, 1] <= original[:, 1] + 1e-12))
-
-    def test_re_expansion_never_exceeds_original_bounds(self) -> None:
-        original = _bounds(-3.0, 3.0, -3.0, 3.0)
-        current = _bounds(-1.0, 1.0, -1.0, 1.0)
-        proposed = _bounds(-0.5, 0.5, -0.5, 0.5)
-        # incumbent is just inside original, way outside current
-        incumbent = np.array([2.9, -2.9])
-        result = finalize_zoom_bounds(
-            proposed,
-            np.array([0.0, 0.0]),
-            current,
-            original,
+class TestThreePhaseAGSLS(unittest.TestCase):
+    def _search(self, config: AGSLSConfig | None = None) -> AdaptiveGridSmoothLifeSearch:
+        smoothlife = SmoothLifeConfig(
             grid_shape=(32, 32),
-            config=_config(edge_risk_fraction=0.5),
-            incumbent_point=incumbent,
+            evaluations_per_step=4,
+            snapshot_interval=1,
+            preset="search",
+            subpixel_confirm=False,
         )
-        self.assertGreaterEqual(result[0, 0], original[0, 0] - 1e-12)
-        self.assertLessEqual(result[0, 1], original[0, 1] + 1e-12)
-        self.assertGreaterEqual(result[1, 0], original[1, 0] - 1e-12)
-        self.assertLessEqual(result[1, 1], original[1, 1] + 1e-12)
-        # Incumbent must end up inside the new bounds.
-        self.assertLessEqual(result[0, 0], incumbent[0] + 1e-9)
-        self.assertGreaterEqual(result[1, 1], incumbent[1] - 1e-9)
-
-
-class TestRosenbrockBoundLossRegression(unittest.TestCase):
-    """End-to-end regression for the user-reported failure mode (seed=7).
-
-    Pre-R5, AGSLS cropped y_low past 1.0 at zoom 3 and never recovered, leaving
-    `best_value` stuck at ~5e-3. After R5, the protected incumbent forces
-    re-expansion across subsequent zooms, and best_value converges below 1e-3.
-    """
-
-    def test_agsls_y_low_re_expands_across_zooms(self) -> None:
-        """The defining behavioural fingerprint of R5: bounds are no longer
-        monotonically contracting when an incumbent guard fires. On seed=7
-        Rosenbrock at full budget the y axis re-expands several times after the
-        initial crop. We only assert the non-monotonic property here; full
-        convergence is measured by the production ablation.
-        """
-
-        from smooth_life_search import (
-            AdaptiveGridSmoothLifeSearch,
-            SmoothLifeConfig,
-            rosenbrock,
+        return AdaptiveGridSmoothLifeSearch(
+            sphere,
+            [(-8.0, 8.0), (-8.0, 8.0)],
+            smoothlife,
+            config or AGSLSConfig(max_evaluations=240, min_basin_cells=4, cluster_min_samples=2),
         )
 
-        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
-        smoothlife = SmoothLifeConfig(grid_shape=(64, 64), preset="search")
-        agsls = AGSLSConfig(max_zoom_cycles=5, max_evaluations=8000)
-        controller = AdaptiveGridSmoothLifeSearch(rosenbrock, bounds, smoothlife, agsls)
-        controller.reset(seed=7)
-        run = controller.run(evaluations=8000)
-
-        # Walk the y_low trace. Pre-R5 it was monotonically non-decreasing once cropped;
-        # post-R5 it must drop at least once when the incumbent guard re-expands.
-        y_lows = [event.new_bounds[1, 0] for event in run.zoom_events]
-        x_lows = [event.new_bounds[0, 0] for event in run.zoom_events]
-        y_re_expansions = sum(1 for prev, curr in zip(y_lows, y_lows[1:]) if curr < prev - 1e-9)
-        x_re_expansions = sum(1 for prev, curr in zip(x_lows, x_lows[1:]) if curr < prev - 1e-9)
-        self.assertGreater(
-            y_re_expansions + x_re_expansions,
-            0,
-            msg=f"bounds never re-expanded — R5 fix did not engage on this seed (y_lows={y_lows})",
-        )
-
-
-class TestFinalPolishRegression(unittest.TestCase):
-    """R6 regression: the user's exact diagnostic case must converge near
-    machine precision via the FD-BFGS final polish.
-    """
-
-    def test_user_diagnostic_seed7_rosenbrock_30000_budget(self) -> None:
-        from smooth_life_search import (
-            AdaptiveGridSmoothLifeSearch,
-            SmoothLifeConfig,
-            rosenbrock,
-        )
-
-        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
-        smoothlife = SmoothLifeConfig(preset="search")
-        agsls = AGSLSConfig(max_zoom_cycles=5, max_evaluations=30000)
-        controller = AdaptiveGridSmoothLifeSearch(rosenbrock, bounds, smoothlife, agsls)
-        controller.reset(seed=7)
-        run = controller.run(evaluations=30000)
-
-        polish = run.metadata.get("final_polish") or {}
-        self.assertTrue(bool(polish.get("enabled")), msg="polish should be enabled by default")
-        self.assertTrue(bool(polish.get("ran")), msg=f"polish did not run; summary={polish}")
-        self.assertGreater(int(polish.get("evaluations_spent", 0)), 0)
-
-        # Polish must improve on (or tie) the seed point passed in.
-        start_value = float(polish.get("start_value", float("inf")))
-        final_value = float(polish.get("final_value", float("inf")))
-        self.assertLessEqual(
-            final_value,
-            start_value + 1e-12,
-            msg=f"polish regressed on its own seed: start={start_value} → final={final_value}",
-        )
-
-        # And the user's reported pre-R5 best_value of ~5e-3 should now be
-        # below 1e-3, confirming the R5+R6 chain delivers on the diagnostic case.
-        self.assertLess(
-            run.best_value,
-            1e-3,
-            msg=f"best_value {run.best_value} fails the user diagnostic regression",
-        )
-
-
-class TestInterZoomPolish(unittest.TestCase):
-    """R7: inter-zoom FD-BFGS polish runs after each accepted zoom and
-    feeds AGSLS a precise incumbent for the next basin decision.
-    """
-
-    @staticmethod
-    def _run_rosenbrock(*, inter_zoom_enabled: bool, budget: int = 8000, seed: int = 7):
-        from smooth_life_search import (
-            AdaptiveGridSmoothLifeSearch,
-            SmoothLifeConfig,
-            rosenbrock,
-        )
-
-        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
-        smoothlife = SmoothLifeConfig(preset="search")
-        agsls = AGSLSConfig(
-            max_zoom_cycles=5,
-            max_evaluations=budget,
-            inter_zoom_polish_enabled=inter_zoom_enabled,
-        )
-        controller = AdaptiveGridSmoothLifeSearch(rosenbrock, bounds, smoothlife, agsls)
-        controller.reset(seed=seed)
-        return controller.run(evaluations=budget)
-
-    def test_runs_between_zooms(self) -> None:
-        run = self._run_rosenbrock(inter_zoom_enabled=True)
-        history = run.metadata.get("inter_zoom_polish_history") or []
-        # At least one entry per accepted zoom (some zooms may not have
-        # produced an incumbent change, but the polish always records).
-        self.assertGreaterEqual(len(history), len(run.zoom_events))
-        ran = [e for e in history if e.get("ran")]
-        self.assertGreater(len(ran), 0, msg="no inter-zoom polish actually ran")
-
-    def test_improves_running_incumbent(self) -> None:
-        """The first inter-zoom polish should always improve its seed
-        substantially: AGSLS's incumbent at zoom 0 is far from precise.
-        Later polishes may be no-ops once the incumbent converges, so we
-        only check the first.
-        """
-        run = self._run_rosenbrock(inter_zoom_enabled=True)
-        history = run.metadata.get("inter_zoom_polish_history") or []
-        ran = [e for e in history if e.get("ran")]
-        self.assertGreater(len(ran), 0)
-        first = ran[0]
-        start = float(first.get("start_value", float("inf")))
-        final = float(first.get("final_value", float("inf")))
-        self.assertLess(
-            final,
-            start - 1e-9,
-            msg=f"first polish did not improve: start={start} → final={final}",
-        )
-
-    def test_disabled_records_no_history(self) -> None:
-        run = self._run_rosenbrock(inter_zoom_enabled=False)
-        history = run.metadata.get("inter_zoom_polish_history") or []
-        self.assertEqual(history, [], msg="inter-zoom polish ran while disabled")
-
-    def test_respects_active_budget(self) -> None:
-        # Tight budget — total evaluations must never exceed it.
-        budget = 1500
-        run = self._run_rosenbrock(inter_zoom_enabled=True, budget=budget)
-        self.assertLessEqual(run.evaluations, budget)
-
-    def test_seed7_zoom_count_no_higher_than_r6(self) -> None:
-        """The R6-only run on seed=7 produced ~10 zooms before terminating.
-        With the inter-zoom polish anchoring the incumbent each round, AGSLS
-        should converge in fewer or equal zoom rounds.
-        """
-        run_off = self._run_rosenbrock(inter_zoom_enabled=False)
-        run_on = self._run_rosenbrock(inter_zoom_enabled=True)
-        self.assertLessEqual(
-            len(run_on.zoom_events),
-            len(run_off.zoom_events),
-            msg=f"R7 inter-zoom polish increased zoom count: on={len(run_on.zoom_events)} off={len(run_off.zoom_events)}",
-        )
-
-    def test_final_polish_kind_unchanged(self) -> None:
-        """R6 final polish must keep its 'fd_bfgs' kind tag (back-compat)."""
-        run = self._run_rosenbrock(inter_zoom_enabled=True)
-        final = run.metadata.get("final_polish") or {}
-        self.assertEqual(final.get("kind"), "fd_bfgs")
-
-    def test_inter_zoom_polish_kind_distinguishes(self) -> None:
-        """Inter-zoom polishes carry a distinct 'kind' tag."""
-        run = self._run_rosenbrock(inter_zoom_enabled=True)
-        history = run.metadata.get("inter_zoom_polish_history") or []
-        for entry in history:
-            self.assertEqual(entry.get("kind"), "fd_bfgs_inter_zoom")
-
-
-class TestTimePhasedStrategy(unittest.TestCase):
-    """R8: pure budget_fraction-driven AGSLS strategy.
-
-    The explore phase records no zooms; the commit phase zooms with full
-    basin scoring; the refine phase forces late_stage_mode regardless of
-    plateau or box-size heuristics.
-    """
-
-    @staticmethod
-    def _run_rosenbrock(
+    def _valley_tracking_fixture(
+        self,
         *,
-        time_phased: bool,
-        budget: int = 8000,
-        seed: int = 7,
-        explore_end: float = 0.30,
-        commit_end: float = 0.70,
-    ):
-        from smooth_life_search import (
-            AdaptiveGridSmoothLifeSearch,
-            SmoothLifeConfig,
-            build_time_phased_policy,
-            rosenbrock,
+        config: AGSLSConfig | None = None,
+        start: np.ndarray | None = None,
+    ) -> tuple[AdaptiveGridSmoothLifeSearch, Basin]:
+        def objective(point: np.ndarray) -> float:
+            return float(0.05 * (point[0] - 0.40) ** 2 + 2.0 * (point[1] - 0.50) ** 2)
+
+        resolved_config = config or AGSLSConfig(
+            max_evaluations=240,
+            min_basin_cells=4,
+            cluster_min_samples=2,
+            exploitation_valley_probe_evaluations=6,
+            exploitation_valley_step_fraction=0.15,
+        )
+        smoothlife = SmoothLifeConfig(
+            grid_shape=(32, 32),
+            evaluations_per_step=4,
+            snapshot_interval=1,
+            preset="search",
+            subpixel_confirm=False,
+        )
+        search = AdaptiveGridSmoothLifeSearch(
+            objective,
+            [(0.0, 1.0), (0.0, 1.0)],
+            smoothlife,
+            resolved_config,
+        )
+        search.reset(seed=0)
+        state = search.engine.state
+        bounds = np.asarray([[0.0, 1.0], [0.0, 1.0]], dtype=float)
+        shape = search.engine.config.grid_shape
+        rows, cols = np.indices(shape)
+        points = evaluation_points(rows.ravel(), cols.ravel(), bounds, shape)
+        values = np.asarray([objective(point) for point in points], dtype=float).reshape(shape)
+        best_point = np.asarray([0.60, 0.50], dtype=float) if start is None else np.asarray(start, dtype=float)
+        best_value = objective(best_point)
+        state.bounds = bounds.copy()
+        state.evaluated_mask[:, :] = True
+        state.objective_values[:, :] = values
+        state.objective_field[:, :] = 1.0
+        state.best_point = best_point.copy()
+        state.best_value = best_value
+        state.local_best_point = best_point.copy()
+        state.local_best_value = best_value
+        state.box_best_point = best_point.copy()
+        state.box_best_value = best_value
+        state.evaluations = 100
+        search.active_max_evaluations = resolved_config.max_evaluations
+        search.engine.active_max_evaluations = resolved_config.max_evaluations
+        basin = _matching_grid_basin(shape, bounds, values)
+        return search, basin
+
+    def test_exploration_phase_runs_smoothlife_without_zooming(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=160,
+            exploration_fraction=0.40,
+            exploration_steps_per_tick=2,
+            min_basin_cells=4,
+            cluster_min_samples=2,
+        )
+        search = self._search(config)
+        search.reset(seed=11)
+        start_bounds = search.engine.current_bounds()
+        search.active_max_evaluations = config.max_evaluations
+        search.engine.active_max_evaluations = config.max_evaluations
+        try:
+            search._run_exploration_phase(config.max_evaluations)
+        finally:
+            search.active_max_evaluations = None
+            search.engine.active_max_evaluations = None
+
+        self.assertEqual(search.zoom_events, [])
+        self.assertTrue(np.allclose(search.engine.current_bounds(), start_bounds))
+        self.assertGreaterEqual(search.engine.state.evaluations, int(config.max_evaluations * config.exploration_fraction * 0.9))
+
+    def test_commit_scoring_prioritizes_group_density_and_support(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=100,
+            commit_mass_weight=2.0,
+            commit_density_weight=2.0,
+            commit_objective_weight=0.1,
+            commit_stability_weight=0.0,
+            commit_area_penalty=0.0,
+        )
+        dense = _basin(support_mass=10.0, alive_density=0.9, objective_score=0.2)
+        objective_only = _basin(support_mass=2.0, alive_density=0.1, objective_score=1.0)
+
+        ranked = score_basins([objective_only, dense], config, phase="commit")
+
+        self.assertIs(ranked[0], dense)
+
+    def test_phase_parameters_apply_guidance_defaults(self) -> None:
+        config = AGSLSConfig(max_evaluations=100)
+        search = self._search(config)
+        search.reset(seed=0)
+
+        search._apply_phase_parameters("exploration")
+        self.assertEqual(search.engine.config.objective_guidance_mode, "sampled")
+        self.assertEqual(search.engine.config.objective_drift_strength, 0.0)
+
+        search._apply_phase_parameters("commit")
+        self.assertEqual(search.engine.config.objective_guidance_mode, "rbf")
+        self.assertEqual(search.engine.config.objective_rbf_top_k, config.commit_guidance_top_k)
+        self.assertAlmostEqual(search.engine.config.objective_rbf_sigma, config.commit_guidance_sigma)
+        self.assertAlmostEqual(search.engine.config.objective_drift_strength, config.commit_drift_strength)
+
+        search._apply_phase_parameters("exploitation")
+        self.assertEqual(search.engine.config.objective_guidance_mode, "rbf")
+        self.assertEqual(search.engine.config.objective_rbf_top_k, config.exploitation_guidance_top_k)
+        self.assertAlmostEqual(search.engine.config.objective_rbf_sigma, config.exploitation_guidance_sigma)
+        self.assertAlmostEqual(search.engine.config.objective_drift_strength, config.exploitation_drift_strength)
+
+    def test_commit_zoom_keeps_conservative_width_floor(self) -> None:
+        config = AGSLSConfig(max_evaluations=100, commit_min_shrink_fraction=0.45)
+        search = self._search(config)
+        search.reset(seed=0)
+        current_bounds = np.asarray([[-10.0, 10.0], [-10.0, 10.0]], dtype=float)
+        tiny = _basin(
+            support_mass=10.0,
+            alive_density=1.0,
+            objective_score=0.5,
+            bbox=np.asarray([[-0.1, 0.1], [-0.1, 0.1]], dtype=float),
         )
 
-        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
-        smoothlife = SmoothLifeConfig(preset="time_phased" if time_phased else "search")
-        agsls = AGSLSConfig(
-            max_zoom_cycles=5,
-            max_evaluations=budget,
-            time_phased_enabled=time_phased,
-            phase_explore_end_fraction=explore_end,
-            phase_commit_end_fraction=commit_end,
-        )
-        policy = None
-        if time_phased:
-            policy = build_time_phased_policy(
-                inner_radius=smoothlife.inner_radius,
-                outer_radius=smoothlife.outer_radius,
-                anti_alias_radius=smoothlife.anti_alias_radius,
-            )
-        controller = AdaptiveGridSmoothLifeSearch(rosenbrock, bounds, smoothlife, agsls, runtime_policy=policy)
-        controller.reset(seed=seed)
-        return controller.run(evaluations=budget)
+        bounds, _details = search._commit_bounds(tiny, current_bounds)
 
-    def test_explore_phase_records_no_zooms(self) -> None:
-        budget = 4000
-        explore_end = 0.30
-        run = self._run_rosenbrock(time_phased=True, budget=budget, explore_end=explore_end)
-        first_zoom_evals = run.zoom_events[0].evaluation_count if run.zoom_events else None
-        self.assertIsNotNone(first_zoom_evals, msg="no zooms recorded at all — explore phase ran but commit didn't")
-        self.assertGreaterEqual(
-            int(first_zoom_evals),
-            int(budget * explore_end * 0.9),
-            msg=f"first zoom commit happened at {first_zoom_evals} evals, before the explore phase ended (~{int(budget*explore_end)})",
+        self.assertIsNotNone(bounds)
+        widths = bounds[:, 1] - bounds[:, 0]
+        self.assertTrue(np.all(widths >= 0.45 * (current_bounds[:, 1] - current_bounds[:, 0]) - 1e-12))
+
+    def test_commit_zoom_retains_global_best(self) -> None:
+        config = AGSLSConfig(max_evaluations=100, commit_min_shrink_fraction=0.45)
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        state.best_point = np.asarray([8.0, 8.0], dtype=float)
+        state.best_value = 0.0
+        current_bounds = np.asarray([[-10.0, 10.0], [-10.0, 10.0]], dtype=float)
+        distant = _basin(
+            support_mass=10.0,
+            alive_density=1.0,
+            objective_score=0.5,
+            bbox=np.asarray([[-9.0, -8.0], [-9.0, -8.0]], dtype=float),
         )
 
-    def test_explore_phase_skipped_when_disabled(self) -> None:
-        run_off = self._run_rosenbrock(time_phased=False, budget=4000)
-        run_on = self._run_rosenbrock(time_phased=True, budget=4000)
-        # Time-phased starts zooming later than non-time-phased.
-        first_off = run_off.zoom_events[0].evaluation_count if run_off.zoom_events else 0
-        first_on = run_on.zoom_events[0].evaluation_count if run_on.zoom_events else 0
-        self.assertGreater(first_on, first_off)
+        bounds, details = search._commit_bounds(distant, current_bounds)
 
-    def test_refine_phase_forces_late_stage_mode(self) -> None:
-        run = self._run_rosenbrock(time_phased=True, budget=8000)
-        # The decision_trace records late_stage_mode per box; refine-phase
-        # zooms (budget_fraction >= 0.7) must all have it set.
-        traces = run.metadata.get("decision_trace", [])
-        refine_traces = [
-            t for t in traces
-            if t.get("accepted") and float(t.get("evaluations_after", 0)) / 8000 >= 0.70
-        ]
-        # If there are refine-phase zooms, all must have late_stage_mode True.
-        for t in refine_traces:
-            self.assertTrue(
-                bool(t.get("late_stage_mode")),
-                msg=f"refine-phase zoom missing late_stage_mode: {t}",
-            )
+        self.assertIsNotNone(bounds)
+        self.assertTrue(bool(details["retained_global_best"]))
+        self.assertTrue(np.all(state.best_point >= bounds[:, 0]))
+        self.assertTrue(np.all(state.best_point <= bounds[:, 1]))
 
-    def test_plateau_heuristic_disabled_under_time_phased(self) -> None:
-        """Even when state.global_improvement is 0, the time-phased trigger
-        does not fire late_stage_mode unless budget_fraction crosses
-        phase_commit_end_fraction.
-        """
-        run = self._run_rosenbrock(time_phased=True, budget=2000, commit_end=0.99)
-        traces = run.metadata.get("decision_trace", [])
-        # With commit_end=0.99 and budget=2000, all zooms (which use ≤1980 evals)
-        # are in commit phase, so late_stage_mode should be False everywhere
-        # despite any plateau.
-        for t in traces:
-            if t.get("accepted") and int(t.get("evaluations_after", 0)) < int(2000 * 0.99):
-                self.assertFalse(
-                    bool(t.get("late_stage_mode")),
-                    msg=f"plateau heuristic fired late_stage_mode in commit phase: {t}",
-                )
-
-    def test_user_diagnostic_seed7_under_time_phased(self) -> None:
-        """The user's exact diagnostic case under the new preset must
-        still converge (R6+R7 polish closes the loop).
-        """
-        run = self._run_rosenbrock(time_phased=True, budget=12000, seed=7)
-        self.assertLess(
-            run.best_value,
-            1e-3,
-            msg=f"time_phased preset regressed user diagnostic: best_value={run.best_value}",
+    def test_commit_surrogate_center_overrides_basin_best_when_valid(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=100,
+            commit_min_shrink_fraction=0.45,
+            commit_surrogate_support_weight=0.0,
         )
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        current_bounds = np.asarray([[-1.0, 2.0], [-1.0, 2.0]], dtype=float)
+        optimum = np.asarray([0.37, 0.81], dtype=float)
+        shape = search.engine.config.grid_shape
+        rows, cols = np.indices(shape)
+        points = evaluation_points(rows.ravel(), cols.ravel(), current_bounds, shape)
+        values = np.asarray([np.sum((point - optimum) ** 2) for point in points], dtype=float).reshape(shape)
+        state.bounds = current_bounds.copy()
+        state.evaluated_mask[:, :] = True
+        state.objective_values[:, :] = values
+        state.objective_field[:, :] = 1.0
+        state.best_point = optimum.copy()
+        state.best_value = 0.0
+        basin = _matching_grid_basin(shape, current_bounds, values, bbox_grid=(8, 8, 23, 23))
 
+        bounds, details = search._commit_bounds(basin, current_bounds)
 
-class TestR9PolishConfig(unittest.TestCase):
-    """R9: polish tolerances are config-driven; iterative refinement triggers
-    on ``gradient_converged`` exits with budget remaining.
-    """
+        self.assertIsNotNone(bounds)
+        self.assertTrue(bool(details["surrogate_used"]), msg=details.get("surrogate_reason"))
+        self.assertTrue(np.allclose(details["zoom_center"], optimum, atol=1e-2))
+        self.assertIn("surrogate_condition", details)
 
-    def test_polish_uses_config_gradient_tolerance(self) -> None:
-        from smooth_life_search import (
-            AdaptiveGridSmoothLifeSearch,
-            SmoothLifeConfig,
-            rosenbrock,
+    def test_commit_surrogate_rejection_falls_back_with_diagnostics(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=100,
+            commit_surrogate_min_samples=4096,
+            commit_surrogate_max_samples=4096,
         )
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        current_bounds = np.asarray([[-1.0, 2.0], [-1.0, 2.0]], dtype=float)
+        shape = search.engine.config.grid_shape
+        rows, cols = np.indices(shape)
+        points = evaluation_points(rows.ravel(), cols.ravel(), current_bounds, shape)
+        values = np.asarray([np.sum(point * point) for point in points], dtype=float).reshape(shape)
+        state.bounds = current_bounds.copy()
+        state.evaluated_mask[:, :] = True
+        state.objective_values[:, :] = values
+        state.objective_field[:, :] = 1.0
+        basin = _matching_grid_basin(shape, current_bounds, values, bbox_grid=(8, 8, 23, 23))
 
-        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
-        smoothlife = SmoothLifeConfig(preset="search")
-        # Loose tolerance: polish should converge / exit much faster.
-        agsls_loose = AGSLSConfig(
-            max_zoom_cycles=3,
-            max_evaluations=2000,
-            polish_gradient_tolerance=1e-2,
-        )
-        # Tight tolerance: polish should run more iterations / use more evals.
-        agsls_tight = AGSLSConfig(
-            max_zoom_cycles=3,
-            max_evaluations=2000,
-            polish_gradient_tolerance=1e-12,
-        )
-        loose = AdaptiveGridSmoothLifeSearch(rosenbrock, bounds, smoothlife, agsls_loose)
-        loose.reset(seed=7)
-        run_loose = loose.run(evaluations=2000)
-        tight = AdaptiveGridSmoothLifeSearch(rosenbrock, bounds, smoothlife, agsls_tight)
-        tight.reset(seed=7)
-        run_tight = tight.run(evaluations=2000)
+        bounds, details = search._commit_bounds(basin, current_bounds)
 
-        loose_polish = run_loose.metadata.get("final_polish") or {}
-        tight_polish = run_tight.metadata.get("final_polish") or {}
-        # Loose tolerance polish must use no more iterations than tight.
-        self.assertLessEqual(
-            int(loose_polish.get("iterations", 0)),
-            int(tight_polish.get("iterations", 0)),
-        )
+        self.assertIsNotNone(bounds)
+        self.assertFalse(bool(details["surrogate_used"]))
+        self.assertEqual(details["surrogate_reason"], "insufficient_samples")
 
-    def test_iterative_refinement_fires_on_gradient_converged(self) -> None:
-        """Synthetic objective that BFGS solves quickly — polish should hit
-        ``gradient_converged``, then iterative refinement should fire and
-        continue with shrunk tolerances.
-        """
-        from smooth_life_search import (
-            AdaptiveGridSmoothLifeSearch,
-            SmoothLifeConfig,
-            sphere,
+    def test_commit_surrogate_can_fall_back_to_incumbent_local_fit(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=100,
+            commit_min_shrink_fraction=0.45,
+            commit_surrogate_support_weight=0.0,
         )
-
-        bounds = [(-5.0, 5.0), (-5.0, 5.0)]
-        smoothlife = SmoothLifeConfig(preset="search")
-        agsls = AGSLSConfig(
-            max_zoom_cycles=3,
-            max_evaluations=2000,
-            polish_gradient_tolerance=1e-3,  # easy to converge
-            polish_iterative_refinement_passes=2,
-            polish_iterative_refinement_shrink=0.1,
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        current_bounds = np.asarray([[-1.0, 2.0], [-1.0, 2.0]], dtype=float)
+        optimum = np.asarray([0.37, 0.81], dtype=float)
+        shape = search.engine.config.grid_shape
+        rows, cols = np.indices(shape)
+        points = evaluation_points(rows.ravel(), cols.ravel(), current_bounds, shape)
+        values = np.asarray([np.sum((point - optimum) ** 2) for point in points], dtype=float).reshape(shape)
+        best_flat = int(np.argmin(values))
+        best_row, best_col = np.unravel_index(best_flat, shape)
+        best_point = evaluation_points(
+            np.asarray([best_row], dtype=int),
+            np.asarray([best_col], dtype=int),
+            current_bounds,
+            shape,
+        )[0]
+        state.bounds = current_bounds.copy()
+        state.evaluated_mask[:, :] = True
+        state.objective_values[:, :] = values
+        state.objective_field[:, :] = 1.0
+        state.best_point = best_point
+        state.best_value = float(values[best_row, best_col])
+        distant = _basin(
+            support_mass=10.0,
+            alive_density=1.0,
+            objective_score=0.5,
+            bbox=np.asarray([[1.4, 1.8], [-0.8, -0.4]], dtype=float),
         )
-        controller = AdaptiveGridSmoothLifeSearch(sphere, bounds, smoothlife, agsls)
-        controller.reset(seed=0)
-        run = controller.run(evaluations=2000)
-        polish = run.metadata.get("final_polish") or {}
-        # If refinement fired, total iterations should exceed a single-pass cap.
-        # With easy tolerance and refinement_passes=2, polish should run multiple
-        # BFGS passes; the iterations counter accumulates across passes.
-        iterations = int(polish.get("iterations", 0))
-        evals_spent = int(polish.get("evaluations_spent", 0))
-        # Sanity: polish ran something and the counters track.
-        self.assertGreaterEqual(iterations, 0)
-        self.assertGreaterEqual(evals_spent, 0)
+        distant.basin_best_value = 10.0
 
-    def test_iterative_refinement_respects_budget_cap(self) -> None:
-        """Refinement must never overshoot ``polish_max_evaluations``."""
-        from smooth_life_search import (
-            AdaptiveGridSmoothLifeSearch,
-            SmoothLifeConfig,
-            sphere,
+        bounds, details = search._commit_bounds(distant, current_bounds)
+
+        self.assertIsNotNone(bounds)
+        self.assertTrue(bool(details["surrogate_used"]), msg=details.get("surrogate_reason"))
+        self.assertEqual(details["surrogate_source"], "incumbent")
+        self.assertTrue(np.allclose(details["zoom_center"], optimum, atol=1e-2))
+
+    def test_commit_surrogate_bounds_retain_incumbent_and_floor(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=100,
+            commit_min_shrink_fraction=0.45,
+            commit_surrogate_support_weight=0.0,
         )
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        current_bounds = np.asarray([[-2.0, 2.0], [-2.0, 2.0]], dtype=float)
+        shape = search.engine.config.grid_shape
+        rows, cols = np.indices(shape)
+        points = evaluation_points(rows.ravel(), cols.ravel(), current_bounds, shape)
+        values = np.asarray([point[0] ** 2 + 3.0 * point[1] ** 2 for point in points], dtype=float).reshape(shape)
+        state.bounds = current_bounds.copy()
+        state.evaluated_mask[:, :] = True
+        state.objective_values[:, :] = values
+        state.objective_field[:, :] = 1.0
+        state.best_point = np.asarray([1.9, 1.9], dtype=float)
+        state.best_value = -1.0
+        basin = _matching_grid_basin(shape, current_bounds, values, bbox_grid=(8, 8, 23, 23))
 
-        bounds = [(-5.0, 5.0), (-5.0, 5.0)]
-        smoothlife = SmoothLifeConfig(preset="search")
-        agsls = AGSLSConfig(
-            max_zoom_cycles=3,
+        bounds, details = search._commit_bounds(basin, current_bounds)
+
+        self.assertIsNotNone(bounds)
+        self.assertTrue(bool(details["surrogate_used"]), msg=details.get("surrogate_reason"))
+        self.assertTrue(bool(details["retained_global_best"]))
+        self.assertTrue(np.all(state.best_point >= bounds[:, 0]))
+        self.assertTrue(np.all(state.best_point <= bounds[:, 1]))
+        widths = bounds[:, 1] - bounds[:, 0]
+        self.assertTrue(np.all(widths >= 0.45 * (current_bounds[:, 1] - current_bounds[:, 0]) - 1e-12))
+
+    def test_commit_persistence_explores_minimum_active_box_fraction(self) -> None:
+        config = AGSLSConfig(
             max_evaluations=1000,
-            final_polish_max_evaluations=64,
-            polish_gradient_tolerance=1e-3,
-            polish_iterative_refinement_passes=5,
+            commit_min_explored_fraction=0.10,
+            commit_steps_per_zoom=1,
+            min_basin_cells=4,
+            cluster_min_samples=2,
         )
-        controller = AdaptiveGridSmoothLifeSearch(sphere, bounds, smoothlife, agsls)
-        controller.reset(seed=0)
-        run = controller.run(evaluations=1000)
-        polish = run.metadata.get("final_polish") or {}
-        self.assertLessEqual(int(polish.get("evaluations_spent", 0)), 64)
+        search = self._search(config)
+        search.reset(seed=5)
+        search.active_max_evaluations = config.max_evaluations
+        search.engine.active_max_evaluations = config.max_evaluations
+        try:
+            search._persistence_map(1, min_explored_fraction=config.commit_min_explored_fraction)
+        finally:
+            search.active_max_evaluations = None
+            search.engine.active_max_evaluations = None
 
-    def test_polish_config_validation_rejects_invalid(self) -> None:
-        with self.assertRaises(ValueError):
-            AGSLSConfig(polish_gradient_tolerance=-1e-8)
-        with self.assertRaises(ValueError):
-            AGSLSConfig(polish_finite_difference_step=0.0)
-        with self.assertRaises(ValueError):
-            AGSLSConfig(polish_iterative_refinement_passes=-1)
-        with self.assertRaises(ValueError):
-            AGSLSConfig(polish_iterative_refinement_shrink=1.0)
-        with self.assertRaises(ValueError):
-            AGSLSConfig(polish_iterative_refinement_shrink=0.0)
+        self.assertGreaterEqual(float(np.mean(search.engine.state.evaluated_mask)), config.commit_min_explored_fraction)
+
+    def test_exploitation_centers_on_global_best_when_available(self) -> None:
+        config = AGSLSConfig(max_evaluations=100, exploitation_shrink_fraction=0.25)
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        state.bounds = np.asarray([[-4.0, 4.0], [-4.0, 4.0]], dtype=float)
+        state.best_point = np.asarray([1.0, -2.0], dtype=float)
+        state.best_value = 0.0
+
+        bounds, details = search._exploitation_bounds(None, state.bounds)
+
+        self.assertIsNotNone(bounds)
+        self.assertTrue(details["anchored_on_global_best"])
+        self.assertTrue(np.allclose(np.mean(bounds, axis=1), state.best_point))
+
+    def test_exploitation_valley_tracking_updates_global_best(self) -> None:
+        search, basin = self._valley_tracking_fixture()
+        state = search.engine.state
+        before = float(state.best_value)
+
+        details = search._track_exploitation_valley(basin, state.bounds.copy())
+
+        self.assertTrue(bool(details["valley_tracking_used"]), msg=details["valley_tracking_reason"])
+        self.assertGreater(int(details["valley_tracking_probes"]), 0)
+        self.assertGreater(int(details["valley_tracking_improvements"]), 0)
+        self.assertLess(float(state.best_value), before)
+        self.assertLess(float(state.best_point[0]), 0.60)
+
+    def test_exploitation_valley_tracking_keeps_best_when_probes_are_worse(self) -> None:
+        search, basin = self._valley_tracking_fixture(start=np.asarray([0.40, 0.50], dtype=float))
+        state = search.engine.state
+        before_point = state.best_point.copy()
+        before_value = float(state.best_value)
+
+        details = search._track_exploitation_valley(basin, state.bounds.copy())
+
+        self.assertTrue(bool(details["valley_tracking_used"]), msg=details["valley_tracking_reason"])
+        self.assertEqual(int(details["valley_tracking_improvements"]), 0)
+        self.assertTrue(np.allclose(state.best_point, before_point))
+        self.assertEqual(float(state.best_value), before_value)
+
+    def test_exploitation_valley_tracking_respects_probe_reserve(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=120,
+            exploitation_valley_probe_evaluations=8,
+            exploitation_valley_step_fraction=0.15,
+        )
+        search, basin = self._valley_tracking_fixture(config=config)
+        state = search.engine.state
+        state.evaluations = config.max_evaluations - search.engine.config.evaluations_per_step
+
+        details = search._track_exploitation_valley(basin, state.bounds.copy())
+
+        self.assertFalse(bool(details["valley_tracking_used"]))
+        self.assertEqual(details["valley_tracking_reason"], "no_probe_budget")
+        self.assertEqual(int(details["valley_tracking_probes"]), 0)
+        self.assertEqual(int(state.evaluations), config.max_evaluations - search.engine.config.evaluations_per_step)
+
+    def test_exploitation_valley_tracking_disabled_is_noop(self) -> None:
+        config = AGSLSConfig(max_evaluations=240, exploitation_valley_tracking_enabled=False)
+        search, basin = self._valley_tracking_fixture(config=config)
+        state = search.engine.state
+        before_point = state.best_point.copy()
+        before_value = float(state.best_value)
+
+        details = search._track_exploitation_valley(basin, state.bounds.copy())
+
+        self.assertFalse(bool(details["valley_tracking_used"]))
+        self.assertEqual(details["valley_tracking_reason"], "disabled")
+        self.assertTrue(np.allclose(state.best_point, before_point))
+        self.assertEqual(float(state.best_value), before_value)
+
+    def test_exploitation_zoom_centers_on_valley_improved_best(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=240,
+            exploitation_shrink_fraction=0.25,
+            exploitation_valley_probe_evaluations=4,
+            exploitation_valley_step_fraction=0.15,
+        )
+        search, basin = self._valley_tracking_fixture(config=config)
+        state = search.engine.state
+
+        valley_details = search._track_exploitation_valley(basin, state.bounds.copy())
+        bounds, details = search._exploitation_bounds(basin, state.bounds.copy())
+        details.update(valley_details)
+
+        self.assertIsNotNone(bounds)
+        self.assertGreater(int(details["valley_tracking_improvements"]), 0)
+        self.assertTrue(np.allclose(np.mean(bounds, axis=1), state.best_point))
+
+    def test_exploitation_valley_tracking_rejected_surrogate_falls_back(self) -> None:
+        config = AGSLSConfig(
+            max_evaluations=240,
+            exploitation_valley_surrogate_min_samples=4000,
+            exploitation_valley_surrogate_max_samples=4000,
+        )
+        search, basin = self._valley_tracking_fixture(config=config)
+        state = search.engine.state
+        before_point = state.best_point.copy()
+
+        details = search._track_exploitation_valley(basin, state.bounds.copy())
+        bounds, zoom_details = search._exploitation_bounds(basin, state.bounds.copy())
+
+        self.assertFalse(bool(details["valley_tracking_used"]))
+        self.assertTrue(str(details["valley_tracking_reason"]).startswith("surrogate_"))
+        self.assertIsNotNone(bounds)
+        self.assertTrue(zoom_details["anchored_on_global_best"])
+        self.assertTrue(np.allclose(np.mean(bounds, axis=1), before_point))
+
+    def test_exploitation_can_shrink_below_current_pixel_size(self) -> None:
+        config = AGSLSConfig(max_evaluations=100, exploitation_shrink_fraction=0.20)
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        state.best_point = np.asarray([0.0, 0.0], dtype=float)
+        current = np.asarray([[-8.0, 8.0], [-8.0, 8.0]], dtype=float)
+        original_cell_width = (current[0, 1] - current[0, 0]) / search.engine.config.grid_shape[1]
+
+        for _ in range(3):
+            next_bounds, _details = search._exploitation_bounds(None, current)
+            self.assertIsNotNone(next_bounds)
+            current = next_bounds
+
+        self.assertLess(float(current[0, 1] - current[0, 0]), original_cell_width)
+
+    def test_exploitation_progress_ignores_shared_area_floor(self) -> None:
+        config = AGSLSConfig(max_evaluations=100, exploitation_shrink_fraction=1e-6)
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        state.best_point = np.asarray([0.0, 0.0], dtype=float)
+        current = np.asarray([[-1e-13, 1e-13], [-2e-13, 2e-13]], dtype=float)
+
+        bounds, details = search._exploitation_bounds(None, current)
+
+        self.assertIsNotNone(bounds)
+        self.assertEqual(details["zoom_reason"], "exploitation_global_best")
+        self.assertLess(float(bounds[0, 1] - bounds[0, 0]), float(current[0, 1] - current[0, 0]))
+
+    def test_exploitation_uses_representable_floor_around_nonzero_best(self) -> None:
+        config = AGSLSConfig(max_evaluations=100, exploitation_shrink_fraction=1e-26)
+        search = self._search(config)
+        search.reset(seed=0)
+        state = search.engine.state
+        state.best_point = np.asarray([1.0043639203712165, 1.0086010958425873], dtype=float)
+        current = np.asarray(
+            [[0.4017116880416868, 1.031345936745257], [0.0511081186294553, 1.0517908766555786]],
+            dtype=float,
+        )
+
+        bounds, details = search._exploitation_bounds(None, current)
+
+        self.assertIsNotNone(bounds)
+        self.assertTrue(bool(details["representable_floor"]))
+        self.assertTrue(np.all(bounds[:, 1] > bounds[:, 0]))
+        self.assertTrue(np.all(state.best_point >= bounds[:, 0]))
+        self.assertTrue(np.all(state.best_point <= bounds[:, 1]))
+
+    def test_exploitation_persistence_reserves_remap_budget(self) -> None:
+        config = AGSLSConfig(max_evaluations=40, exploitation_steps_per_zoom=100, min_basin_cells=4, cluster_min_samples=2)
+        search = self._search(config)
+        search.reset(seed=0)
+        search.active_max_evaluations = config.max_evaluations
+        search.engine.active_max_evaluations = config.max_evaluations
+        try:
+            search._persistence_map(100, reserve_evaluations=search.engine.config.evaluations_per_step)
+        finally:
+            search.active_max_evaluations = None
+            search.engine.active_max_evaluations = None
+
+        self.assertGreaterEqual(config.max_evaluations - int(search.engine.state.evaluations), search.engine.config.evaluations_per_step)
 
 
 if __name__ == "__main__":

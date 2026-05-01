@@ -29,9 +29,11 @@ def rosenbrock(x: np.ndarray | list[float] | tuple[float, ...]) -> float:
 def ackley(x: np.ndarray | list[float] | tuple[float, ...]) -> float:
     arr = _as_array(x)
     n = arr.size
-    term_1 = -20.0 * math.exp(-0.2 * math.sqrt(np.sum(np.square(arr)) / n))
-    term_2 = -math.exp(np.sum(np.cos(2.0 * math.pi * arr)) / n)
-    return float(term_1 + term_2 + 20.0 + math.e)
+    radius = math.sqrt(float(np.sum(np.square(arr))) / n)
+    mean_cos = float(np.sum(np.cos(2.0 * math.pi * arr)) / n)
+    radial = -20.0 * math.expm1(-0.2 * radius)
+    periodic = -math.e * math.expm1(mean_cos - 1.0)
+    return float(radial + periodic)
 
 
 def rastrigin(x: np.ndarray | list[float] | tuple[float, ...]) -> float:

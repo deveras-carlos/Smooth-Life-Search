@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 
 
@@ -61,6 +63,78 @@ def normalized_objective_field(
         normalized = np.power(normalized, float(gamma))
     objective_field[evaluated_mask] = normalized
     return objective_field
+
+
+@lru_cache(maxsize=16)
+def _normalized_grid_points(shape: tuple[int, int]) -> np.ndarray:
+    height, width = shape
+    rows = (np.arange(height, dtype=float) + 0.5) / height
+    cols = (np.arange(width, dtype=float) + 0.5) / width
+    grid_cols, grid_rows = np.meshgrid(cols, rows, indexing="xy")
+    return np.column_stack((grid_cols.ravel(), grid_rows.ravel()))
+
+
+def guided_objective_field(
+    objective_values: np.ndarray,
+    evaluated_mask: np.ndarray,
+    *,
+    maximize: bool,
+    gamma: float = 1.0,
+    mode: str = "sampled",
+    rbf_top_k: int = 64,
+    rbf_sigma: float = 0.12,
+    rbf_temperature: float = 0.20,
+    uncertainty_weight: float = 0.0,
+) -> np.ndarray:
+    """Return objective support, optionally extended by an RBF/softmax guide.
+
+    The sampled mode is the exact historical behavior. The RBF mode keeps
+    evaluated cells truthful while allowing good samples to attract nearby
+    unevaluated cells in normalized grid coordinates.
+    """
+
+    sampled = normalized_objective_field(
+        objective_values,
+        evaluated_mask,
+        maximize=maximize,
+        gamma=gamma,
+    )
+    shape = objective_values.shape
+    guided = sampled.copy()
+    if mode == "rbf" and np.any(evaluated_mask):
+        top_indices = top_evaluated_flat_indices(
+            objective_values,
+            evaluated_mask,
+            maximize=maximize,
+            limit=int(rbf_top_k),
+        )
+        if top_indices:
+            all_points = _normalized_grid_points(shape)
+            flat_top = np.asarray(top_indices, dtype=int)
+            sample_points = all_points[flat_top]
+            sample_support = np.clip(sampled.ravel()[flat_top], 0.0, 1.0)
+            if sample_support.size > 0:
+                sigma2 = max(float(rbf_sigma), 1e-12) ** 2
+                delta = all_points[:, None, :] - sample_points[None, :, :]
+                distance2 = np.sum(delta * delta, axis=2)
+                kernels = np.exp(-0.5 * distance2 / sigma2)
+                temperature = max(float(rbf_temperature), 1e-12)
+                soft_weights = np.exp((sample_support - float(np.max(sample_support))) / temperature)
+                influence = kernels @ soft_weights
+                weighted_support = kernels @ (soft_weights * sample_support)
+                predicted = np.full(influence.shape, 0.5, dtype=float)
+                active = influence > 1e-15
+                predicted[active] = weighted_support[active] / influence[active]
+                confidence_scale = max(float(np.max(soft_weights)), 1e-12)
+                confidence = np.clip(influence / confidence_scale, 0.0, 1.0)
+                guided_flat = 0.5 * (1.0 - confidence) + predicted * confidence
+                if uncertainty_weight > 0.0:
+                    unevaluated = (~evaluated_mask).ravel()
+                    guided_flat[unevaluated] += float(uncertainty_weight) * confidence[unevaluated] * (1.0 - guided_flat[unevaluated])
+                guided = guided_flat.reshape(shape)
+
+    guided[evaluated_mask] = sampled[evaluated_mask]
+    return np.clip(guided, 0.0, 1.0)
 
 
 def best_evaluated_flat_index(

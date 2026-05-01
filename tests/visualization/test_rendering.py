@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import warnings
 
 import numpy as np
 
@@ -55,6 +56,29 @@ class TestVisualizationRendering(unittest.TestCase):
         )
         frame = render_run_frames(run, options=RenderOptions(scale=2))[0]
         self.assertEqual(frame.size, (164, 240))
+
+    def test_convergence_panel_handles_nonfinite_initial_values(self) -> None:
+        snapshot = _snapshot()
+        initial = _snapshot()
+        initial.best_value = float("inf")
+        initial.local_best_value = float("inf")
+        initial.box_best_value = float("inf")
+        initial.metadata["evaluations"] = 0
+        run = SearchRun(
+            best_point=snapshot.best_point,
+            best_value=snapshot.best_value,
+            evaluations=16,
+            bounds=snapshot.bounds,
+            snapshots=[initial, snapshot],
+            zoom_events=[],
+            metadata={"mode": "test"},
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            frame = render_run_frames(run, options=RenderOptions(scale=1))[0]
+
+        self.assertEqual(frame.size, (116, 208))
 
 
 if __name__ == "__main__":

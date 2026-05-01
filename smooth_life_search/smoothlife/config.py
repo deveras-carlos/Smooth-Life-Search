@@ -8,6 +8,7 @@ from typing import Literal
 
 TimeMode = Literal["discrete", "continuous"]
 RunMode = Literal["simulation", "search"]
+ObjectiveGuidanceMode = Literal["sampled", "rbf"]
 
 
 @dataclass(slots=True)
@@ -43,6 +44,14 @@ class SmoothLifeConfig:
     subpixel_best_point: bool = True
     subpixel_confirm: bool = True
     subpixel_confirm_candidates: int = 1
+    best_improvement_tolerance: float = 0.0
+    objective_guidance_mode: ObjectiveGuidanceMode = "sampled"
+    objective_rbf_top_k: int = 64
+    objective_rbf_sigma: float = 0.12
+    objective_rbf_temperature: float = 0.20
+    objective_uncertainty_weight: float = 0.0
+    objective_drift_strength: float = 0.0
+    objective_drift_clip: float = 0.25
     exploitation_score_late_stage: bool = False
 
     def __post_init__(self) -> None:
@@ -74,3 +83,19 @@ class SmoothLifeConfig:
             raise ValueError("snapshot_interval must be positive")
         if self.subpixel_confirm_candidates < 1:
             raise ValueError("subpixel_confirm_candidates must be at least 1")
+        if not self.best_improvement_tolerance >= 0.0:
+            raise ValueError("best_improvement_tolerance must be non-negative")
+        if self.objective_guidance_mode not in ("sampled", "rbf"):
+            raise ValueError("objective_guidance_mode must be 'sampled' or 'rbf'")
+        if self.objective_rbf_top_k <= 0:
+            raise ValueError("objective_rbf_top_k must be positive")
+        if self.objective_rbf_sigma <= 0.0:
+            raise ValueError("objective_rbf_sigma must be positive")
+        if self.objective_rbf_temperature <= 0.0:
+            raise ValueError("objective_rbf_temperature must be positive")
+        if self.objective_uncertainty_weight < 0.0:
+            raise ValueError("objective_uncertainty_weight must be non-negative")
+        if self.objective_drift_strength < 0.0:
+            raise ValueError("objective_drift_strength must be non-negative")
+        if self.objective_drift_clip < 0.0:
+            raise ValueError("objective_drift_clip must be non-negative")

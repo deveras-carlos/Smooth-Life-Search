@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 import smooth_life_search.benchmark as benchmark
 from smooth_life_search.benchmark.artifacts import append_ndjson, load_ndjson, reset_artifacts, write_csv
 
@@ -12,9 +14,12 @@ class TestBenchmarkPackage(unittest.TestCase):
     def test_public_package_exports_core_benchmark_api(self) -> None:
         self.assertIn("sphere", benchmark.OBJECTIVES)
         self.assertIs(benchmark.OBJECTIVES["sphere"], benchmark.sphere)
-        self.assertTrue(hasattr(benchmark, "StudySpec"))
-        self.assertTrue(hasattr(benchmark, "ExploitationStudySpec"))
+        self.assertFalse(hasattr(benchmark, "StudySpec"))
+        self.assertFalse(hasattr(benchmark, "ExploitationStudySpec"))
         self.assertTrue(callable(benchmark.run_seeded_trials))
+
+    def test_ackley_origin_is_numerically_exact_zero(self) -> None:
+        self.assertEqual(benchmark.ackley(np.asarray([0.0, 0.0])), 0.0)
 
     def test_artifact_helpers_round_trip_records_and_reset_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

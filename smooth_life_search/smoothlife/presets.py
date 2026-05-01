@@ -88,6 +88,14 @@ def apply_preset(config: SmoothLifeConfig) -> SmoothLifeConfig:
         preset=config.preset,
         store_all_snapshots=config.store_all_snapshots,
         subpixel_best_point=config.subpixel_best_point,
+        best_improvement_tolerance=config.best_improvement_tolerance,
+        objective_guidance_mode=config.objective_guidance_mode,
+        objective_rbf_top_k=config.objective_rbf_top_k,
+        objective_rbf_sigma=config.objective_rbf_sigma,
+        objective_rbf_temperature=config.objective_rbf_temperature,
+        objective_uncertainty_weight=config.objective_uncertainty_weight,
+        objective_drift_strength=config.objective_drift_strength,
+        objective_drift_clip=config.objective_drift_clip,
     )
     for field_name in (
         "support_ema_alpha",

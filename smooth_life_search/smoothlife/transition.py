@@ -25,6 +25,7 @@ def smoothlife_target_vitality(
     inner_fill: np.ndarray,
     outer_fill: np.ndarray,
     config: SmoothLifeConfig,
+    objective_field: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compute the canonical SmoothLife vitality target in [ 0, 1 ]."""
 
@@ -62,11 +63,12 @@ def smoothlife_transition(
 ) -> tuple[ np.ndarray, np.ndarray ]:
     """Return the signed target state and the target vitality field."""
 
-    target_vitality = smoothlife_target_vitality( inner_fill, outer_fill, config )
+    target_vitality = smoothlife_target_vitality( inner_fill, outer_fill, config, objective_field )
     if objective_field is None or config.run_mode == "simulation" or config.objective_coupling <= 0.0:
         life_support = target_vitality
     else:
-        support_bias = ( 1.0 - config.objective_coupling ) + config.objective_coupling * np.clip( objective_field, 0.0, 1.0 )
+        objective = np.clip(np.nan_to_num(objective_field, nan=0.5, posinf=1.0, neginf=0.0), 0.0, 1.0)
+        support_bias = ( 1.0 - config.objective_coupling ) + config.objective_coupling * objective
         life_support = np.clip( target_vitality * support_bias, 0.0, 1.0 )
     target_magnitude = 1.0 - life_support
     polarity = _resolve_polarity( field )

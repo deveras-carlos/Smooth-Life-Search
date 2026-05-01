@@ -1,233 +1,86 @@
-"""Adaptive Grid Smooth Life Search controller."""
+"""Three-phase Adaptive Grid Smooth Life Search controller."""
 
 from __future__ import annotations
 
-from typing import Callable
+from collections import Counter
+from typing import Callable, Literal
 
 import numpy as np
 
-from ..core import (
-    AGSLS_PER_DECISION_FIELDS,
-    SMOOTHLIFE_PER_STEP_FIELDS,
-    ZOOM_BOUNDARY_FIELDS,
-    Basin,
-    RuntimeSignals,
-    SchedulePolicy,
-    SearchRun,
-    ZoomEvent,
-    bounds_area,
-    normalize_bounds_2d,
-    point_in_bounds,
-)
+from ..core import Basin, RuntimeSignals, SearchRun, ZoomEvent, normalize_bounds_2d, point_in_bounds
 from ..smoothlife.config import SmoothLifeConfig
 from ..smoothlife.search import SmoothLifeSearch
-from .budget import bounded_evaluation_batch, effective_zoom_limit, max_evaluations_reached, remaining_evaluations
 from .config import AGSLSConfig
-from .diagnostics import (
-    empty_microgrid_summary,
-    empty_pattern_search_summary,
-    empty_periodic_local_search_summary,
-    empty_translation_summary,
-    merge_summary,
+from .surrogate import CommitSurrogateResult, fit_commit_surrogate, surrogate_axis_widths, surrogate_valley_tangent
+from .trust_region import (
+    ArchiveQuadraticSurrogate,
+    SampleArchive,
+    TrustRegionState,
+    deterministic_candidate_pool,
+    fit_archive_quadratic,
+    nearest_archive_distance,
+    trust_region_bounds,
 )
-from .geometry import centered_bounds, enforce_min_side_fraction, expand_bounds_to_min_widths, finalize_zoom_bounds, minimum_zoom_widths
-from .late_stage import MicrogridExploiter, PatternSearchExploiter, PeriodicLocalSearch, TranslationZoom
-from .scheduling import steps_for_zoom_cycle
-from .scoring import score_basins
-from .selection import eligible_basins, select_basin, should_choose_leader
 
-Objective = Callable[[ np.ndarray ], float]
+Objective = Callable[[np.ndarray], float]
+PhaseName = Literal["exploration", "commit", "exploitation"]
 
 
 class AdaptiveGridSmoothLifeSearch:
-    """AGSLS: use SmoothLifeSearch locally, then zoom into promising dense groups."""
+    """Drive SmoothLife, then zoom through commit and exploitation phases."""
 
     def __init__(
         self,
         objective: Objective,
-        bounds: np.ndarray | list[ tuple[ float, float ] ],
+        bounds: np.ndarray | list[tuple[float, float]],
         smoothlife_config: SmoothLifeConfig | None = None,
         agsls_config: AGSLSConfig | None = None,
-        runtime_policy: SchedulePolicy | None = None,
     ) -> None:
         self.objective = objective
-        self.original_bounds = self._normalize_bounds( bounds )
+        self.original_bounds = normalize_bounds_2d(bounds, owner="AGSLS")
         self.smoothlife_config = smoothlife_config or SmoothLifeConfig()
         self.agsls_config = agsls_config or AGSLSConfig()
-        self.runtime_policy = runtime_policy
-        self.engine = SmoothLifeSearch( objective, self.original_bounds, self.smoothlife_config, runtime_policy=runtime_policy )
-        self.zoom_events: list[ ZoomEvent ] = [ ]
+        self.engine = SmoothLifeSearch(objective, self.original_bounds, self.smoothlife_config)
+        self.zoom_events: list[ZoomEvent] = []
         self.active_max_evaluations: int | None = None
         self._active_zoom_limit: int | None = None
+        self._decision_trace: list[dict[str, object]] = []
+        self._phase_counts: Counter[str] = Counter()
         self._last_basin_count = 0
         self._last_top_basin_score_gap = 0.0
-        self._decision_reason_counts: dict[str, int] = { }
-        self._accepted_zoom_count = 0
-        self._decision_trace: list[ dict[str, object] ] = [ ]
-        self._box_round_counts: dict[int, int] = { }
-        self._late_stage_round_counts: dict[int, int] = { }
-        self._late_stage_step_counts: dict[int, int] = { }
-        self._periodic_local_search_summaries: dict[int, dict[str, object]] = { }
-        self._inter_zoom_polish_history: list[ dict[str, object] ] = [ ]
+        self.sample_archive = SampleArchive.empty()
+        self._trust_region_states: dict[PhaseName, TrustRegionState] = {
+            "commit": TrustRegionState(),
+            "exploitation": TrustRegionState(),
+        }
+        self._trust_region_events: list[dict[str, object]] = []
+        self._archive_current_grid_samples()
 
-    @staticmethod
-    def _normalize_bounds( bounds: np.ndarray | list[ tuple[ float, float ] ] ) -> np.ndarray:
-        return normalize_bounds_2d( bounds, owner="AGSLS" )
+    def reset(self, seed: int | None = None) -> None:
+        """Reset SmoothLife state and AGSLS history."""
 
-    def reset( self, seed: int | None = None ) -> None:
-        """Reset the underlying SmoothLife engine and zoom history."""
-
-        self.engine.reset( seed=seed, bounds=self.original_bounds.copy() )
-        self.engine.set_zoom_index( 0, max_zoom_cycles=self.agsls_config.max_zoom_cycles )
-        self.zoom_events = [ ]
+        self.engine.reset(seed=seed, bounds=self.original_bounds.copy())
+        self.engine.set_zoom_index(0, max_zoom_cycles=self.agsls_config.max_zoom_cycles)
+        self.zoom_events = []
+        self.active_max_evaluations = None
         self._active_zoom_limit = None
+        self._decision_trace = []
+        self._phase_counts = Counter()
         self._last_basin_count = 0
         self._last_top_basin_score_gap = 0.0
-        self._decision_reason_counts = { }
-        self._accepted_zoom_count = 0
-        self._decision_trace = [ ]
-        self._box_round_counts = { }
-        self._late_stage_round_counts = { }
-        self._late_stage_step_counts = { }
-        self._periodic_local_search_summaries = { }
-        self._inter_zoom_polish_history = [ ]
+        self.sample_archive = SampleArchive.empty()
+        self._trust_region_states = {
+            "commit": TrustRegionState(),
+            "exploitation": TrustRegionState(),
+        }
+        self._trust_region_events = []
+        self._archive_current_grid_samples()
 
-    def _max_evaluations_reached( self ) -> bool:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        return max_evaluations_reached( state, self.agsls_config.max_evaluations, self.active_max_evaluations )
-
-    def _remaining_evaluations( self ) -> int | None:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        return remaining_evaluations( state, self.agsls_config.max_evaluations, self.active_max_evaluations )
-
-    def _bounded_evaluation_batch( self, requested: int ) -> int:
-        return bounded_evaluation_batch( requested, self._remaining_evaluations() )
-
-    def _effective_zoom_limit( self, eval_limit: int | None, configured_limit: int ) -> int:
-        return effective_zoom_limit( eval_limit, configured_limit, self.agsls_config )
-
-    @staticmethod
-    def _bounds_area( bounds: np.ndarray ) -> float:
-        return bounds_area( bounds )
-
-    def _box_area_ratio( self, bounds: np.ndarray ) -> float:
-        return self._bounds_area( bounds ) / max( self._bounds_area( self.original_bounds ), 1e-12 )
-
-    @staticmethod
-    def _point_in_bounds( point: np.ndarray, bounds: np.ndarray ) -> bool:
-        return point_in_bounds( point, bounds )
-
-    def _objective_value_key( self, value: float ) -> float:
-        return float( value ) if self.engine.config.maximize else -float( value )
-
-    def _minimum_zoom_widths( self, current_bounds: np.ndarray ) -> np.ndarray:
-        return minimum_zoom_widths( current_bounds, self.engine.config.grid_shape, self.agsls_config )
-
-    def _enforce_min_side_fraction( self, bounds: np.ndarray, current_bounds: np.ndarray ) -> np.ndarray:
-        return enforce_min_side_fraction( bounds, current_bounds, self.original_bounds, self.agsls_config )
-
-    def _centered_bounds( self, center: np.ndarray, widths: np.ndarray, current_bounds: np.ndarray ) -> np.ndarray:
-        return centered_bounds( center, widths, current_bounds )
-
-    def _finalize_zoom_bounds(
-        self,
-        bounds: np.ndarray,
-        center: np.ndarray,
-        current_bounds: np.ndarray,
-        *,
-        anchor_point: np.ndarray | None = None,
-        incumbent_point: np.ndarray | None = None,
-    ) -> np.ndarray:
-        return finalize_zoom_bounds(
-            bounds,
-            center,
-            current_bounds,
-            self.original_bounds,
-            self.engine.config.grid_shape,
-            self.agsls_config,
-            anchor_point=anchor_point,
-            incumbent_point=incumbent_point,
-        )
-
-    @staticmethod
-    def _empty_microgrid_summary() -> dict[ str, object ]:
-        return empty_microgrid_summary()
-
-    def _microgrid_summary_payload( self, summary: dict[ str, object ] | None ) -> dict[ str, object ]:
-        return merge_summary( self._empty_microgrid_summary(), summary )
-
-    @staticmethod
-    def _empty_translation_summary() -> dict[ str, object ]:
-        return empty_translation_summary()
-
-    def _translation_summary_payload( self, summary: dict[ str, object ] | None ) -> dict[ str, object ]:
-        return merge_summary( self._empty_translation_summary(), summary )
-
-    @staticmethod
-    def _empty_pattern_search_summary() -> dict[ str, object ]:
-        return empty_pattern_search_summary()
-
-    def _pattern_search_summary_payload( self, summary: dict[ str, object ] | None ) -> dict[ str, object ]:
-        return merge_summary( self._empty_pattern_search_summary(), summary )
-
-    @staticmethod
-    def _empty_periodic_local_search_summary() -> dict[ str, object ]:
-        return empty_periodic_local_search_summary()
-
-    def _periodic_local_search_summary_payload(
-        self,
-        *,
-        box_id: int | None = None,
-        summary: dict[ str, object ] | None = None,
-    ) -> dict[ str, object ]:
-        payload = self._empty_periodic_local_search_summary()
-        if box_id is not None:
-            payload.update( self._periodic_local_search_summaries.get( int( box_id ), {} ) )
-        return merge_summary( payload, summary )
-
-    def _late_stage_summary_payload(
-        self,
-        *,
-        box_id: int | None = None,
-        microgrid_summary: dict[ str, object ] | None = None,
-        translation_summary: dict[ str, object ] | None = None,
-        pattern_search_summary: dict[ str, object ] | None = None,
-        periodic_local_search_summary: dict[ str, object ] | None = None,
-    ) -> dict[ str, object ]:
-        payload = self._microgrid_summary_payload( microgrid_summary )
-        payload.update( self._translation_summary_payload( translation_summary ) )
-        payload.update( self._pattern_search_summary_payload( pattern_search_summary ) )
-        payload.update(
-            self._periodic_local_search_summary_payload(
-                box_id=box_id,
-                summary=periodic_local_search_summary,
-            )
-        )
-        return payload
-
-    def _sync_latest_snapshot_state( self ) -> None:
-        state = self.engine.state
-        if state is None or not self.engine.snapshots:
-            return
-        snapshot = self.engine.snapshots[ -1 ]
-        snapshot.best_point = state.best_point.copy()
-        snapshot.best_value = float( state.best_value )
-        snapshot.local_best_point = state.local_best_point.copy()
-        snapshot.local_best_value = float( state.local_best_value )
-        snapshot.box_best_point = state.box_best_point.copy()
-        snapshot.box_best_value = float( state.box_best_value )
-        snapshot.metadata[ "evaluations" ] = int( state.evaluations )
-        snapshot.metadata[ "explored_fraction" ] = float( np.mean( state.evaluated_mask ) )
-
-    def runtime_signals( self ) -> RuntimeSignals:
+    def runtime_signals(self) -> RuntimeSignals:
         base = self.engine.runtime_signals()
         return RuntimeSignals(
             step_index=base.step_index,
-            zoom_index=base.zoom_index,
+            zoom_index=len(self.zoom_events),
             evaluations=base.evaluations,
             remaining_budget=base.remaining_budget,
             total_budget=base.total_budget,
@@ -239,73 +92,141 @@ class AdaptiveGridSmoothLifeSearch:
             stage_improvement=base.stage_improvement,
             basin_count=self._last_basin_count,
             top_basin_score_gap=self._last_top_basin_score_gap,
-            max_zoom_cycles=base.max_zoom_cycles,
+            max_zoom_cycles=self._active_zoom_limit or self.agsls_config.max_zoom_cycles,
         )
 
-    def apply_runtime_overrides( self, overrides: dict[ str, float | int ] ) -> dict[ str, float | int ]:
-        changed: dict[ str, float | int ] = { }
-        if not overrides:
-            return changed
-        for field_name, value in overrides.items():
-            if not hasattr( self.agsls_config, field_name ):
-                continue
-            current = getattr( self.agsls_config, field_name )
-            if current == value:
-                continue
-            setattr( self.agsls_config, field_name, value )
-            changed[ field_name ] = value
-        if changed:
-            self.agsls_config.__post_init__()
-        return changed
+    def _require_state(self):
+        state = self.engine.state
+        if state is None:
+            raise RuntimeError("engine state missing")
+        return state
 
-    def apply_runtime_policy( self, allowed_fields: set[ str ] | frozenset[ str ] ) -> dict[ str, float | int ]:
-        if self.runtime_policy is None:
-            return { }
-        overrides = self.runtime_policy.resolve( self.runtime_signals(), allowed_fields )
-        return self.apply_runtime_overrides( overrides )
+    def _evaluation_limit(self) -> int:
+        limit = self.active_max_evaluations if self.active_max_evaluations is not None else self.agsls_config.max_evaluations
+        if limit is None:
+            raise ValueError("AGSLS runs require max_evaluations or run(evaluations=...)")
+        if limit <= 0:
+            raise ValueError("evaluation limit must be positive")
+        return int(limit)
 
-    def _update_basin_runtime_state( self, basins: list[ Basin ] ) -> None:
-        self._last_basin_count = len( basins )
-        if len( basins ) >= 2:
-            self._last_top_basin_score_gap = float( basins[ 0 ].combined_score - basins[ 1 ].combined_score )
+    def _remaining_evaluations(self) -> int:
+        state = self._require_state()
+        return max(self._evaluation_limit() - int(state.evaluations), 0)
+
+    def _archive_current_grid_samples(self) -> int:
+        state = self._require_state()
+        return self.sample_archive.add_grid(
+            state.objective_values,
+            state.evaluated_mask,
+            state.bounds,
+            self.engine.config.grid_shape,
+        )
+
+    def _max_evaluations_reached(self) -> bool:
+        return self._remaining_evaluations() <= 0
+
+    def _budget_fraction(self) -> float:
+        state = self._require_state()
+        return min(1.0, max(0.0, float(state.evaluations) / float(self._evaluation_limit())))
+
+    def _phase_for_budget(self) -> PhaseName:
+        fraction = self._budget_fraction()
+        if fraction < self.agsls_config.exploration_fraction:
+            return "exploration"
+        if fraction < self.agsls_config.commit_fraction:
+            return "commit"
+        return "exploitation"
+
+    def _apply_phase_parameters(self, phase: PhaseName) -> None:
+        if phase == "exploration":
+            overrides = {
+                "objective_gamma": self.agsls_config.exploration_objective_gamma,
+                "support_ema_alpha": self.agsls_config.exploration_support_ema_alpha,
+                "objective_guidance_mode": "sampled",
+                "objective_uncertainty_weight": 0.0,
+                "objective_drift_strength": 0.0,
+            }
+        elif phase == "commit":
+            overrides = {
+                "objective_gamma": self.agsls_config.commit_objective_gamma,
+                "support_ema_alpha": self.agsls_config.commit_support_ema_alpha,
+                "objective_guidance_mode": "rbf",
+                "objective_rbf_top_k": self.agsls_config.commit_guidance_top_k,
+                "objective_rbf_sigma": self.agsls_config.commit_guidance_sigma,
+                "objective_rbf_temperature": self.agsls_config.commit_guidance_temperature,
+                "objective_uncertainty_weight": self.agsls_config.commit_uncertainty_weight,
+                "objective_drift_strength": self.agsls_config.commit_drift_strength,
+            }
         else:
-            self._last_top_basin_score_gap = 0.0
+            overrides = {
+                "objective_gamma": self.agsls_config.exploitation_objective_gamma,
+                "support_ema_alpha": self.agsls_config.exploitation_support_ema_alpha,
+                "objective_guidance_mode": "rbf",
+                "objective_rbf_top_k": self.agsls_config.exploitation_guidance_top_k,
+                "objective_rbf_sigma": self.agsls_config.exploitation_guidance_sigma,
+                "objective_rbf_temperature": self.agsls_config.exploitation_guidance_temperature,
+                "objective_uncertainty_weight": self.agsls_config.exploitation_uncertainty_weight,
+                "objective_drift_strength": self.agsls_config.exploitation_drift_strength,
+            }
+        self.engine.apply_runtime_overrides(overrides, rebuild_kernels=False)
 
-    def _decision_support_field( self ) -> np.ndarray:
-        smoothed_support = getattr( self.engine, "smoothed_support_field", None )
-        if callable( smoothed_support ):
-            return np.asarray( smoothed_support(), dtype=float )
-        return np.asarray( self.engine.support_field(), dtype=float )
+    def _support_field(self) -> np.ndarray:
+        smoothed_support = getattr(self.engine, "smoothed_support_field", None)
+        if callable(smoothed_support):
+            return np.asarray(smoothed_support(), dtype=float)
+        return np.asarray(self.engine.support_field(), dtype=float)
+
+    def _run_engine_steps(self, steps: int) -> int:
+        gained = 0
+        for _ in range(max(int(steps), 0)):
+            if self._max_evaluations_reached():
+                break
+            before = int(self._require_state().evaluations)
+            self.engine.step(1)
+            after = int(self._require_state().evaluations)
+            gained += max(after - before, 0)
+            if after <= before:
+                break
+        self._archive_current_grid_samples()
+        return gained
 
     def _persistence_map(
         self,
         steps: int,
         *,
-        box_id: int,
-        late_stage_state: dict[ str, float | int | bool ],
+        min_explored_fraction: float = 0.0,
+        reserve_evaluations: int = 0,
     ) -> np.ndarray:
-        height, width = self.engine.config.grid_shape
-        persistence = np.zeros( ( height, width ), dtype=float )
+        persistence = np.zeros(self.engine.config.grid_shape, dtype=float)
         executed_steps = 0
-        for _ in range( steps ):
-            if self._max_evaluations_reached():
+        min_steps = max(int(steps), 1)
+        reserve = max(int(reserve_evaluations), 0)
+        while True:
+            state = self._require_state()
+            explored_fraction = float(np.mean(state.evaluated_mask))
+            if executed_steps >= min_steps and explored_fraction >= float(min_explored_fraction):
                 break
-            remaining = self._remaining_evaluations()
-            if remaining is not None and remaining < self.engine.config.evaluations_per_step:
+            if self._remaining_evaluations() <= reserve:
                 break
-            self.engine.step( 1 )
-            PeriodicLocalSearch( self ).maybe_run( box_id=box_id, late_stage_state=late_stage_state )
-            state = self.engine.state
-            if state is None:
-                raise RuntimeError( "engine state missing after step" )
-            support = self._decision_support_field()
-            alive = self.engine.alive_mask( self.agsls_config.alive_core_threshold )
-            threshold = float( np.quantile( support, self.agsls_config.basin_quantile ) )
-            persistence += ( alive & ( support >= threshold ) ).astype( float )
+            before_evaluations = int(state.evaluations)
+            self.engine.step(1)
+            state = self._require_state()
+            support = self._support_field()
+            alive = self.engine.alive_mask(self.agsls_config.alive_core_threshold)
+            threshold = float(np.quantile(support, self.agsls_config.basin_quantile))
+            persistence += (alive & (support >= threshold)).astype(float)
             executed_steps += 1
-        return persistence / max( executed_steps, 1 )
+            if int(state.evaluations) <= before_evaluations:
+                break
+        if executed_steps == 0:
+            return persistence
+        self._archive_current_grid_samples()
+        return persistence / max(executed_steps, 1)
 
-    def _rank_basins( self, persistence: np.ndarray ) -> list[ Basin ]:
+    def _rank_basins_for_phase(self, phase: PhaseName, persistence: np.ndarray | None = None) -> list[Basin]:
+        state = self._require_state()
+        if persistence is None:
+            persistence = np.zeros(self.engine.config.grid_shape, dtype=float)
         basins = self.engine.basin_candidates(
             threshold_quantile=self.agsls_config.basin_quantile,
             min_cells=self.agsls_config.min_basin_cells,
@@ -314,1812 +235,1110 @@ class AdaptiveGridSmoothLifeSearch:
             cluster_min_samples=self.agsls_config.cluster_min_samples,
             basin_envelope_quantile_offset=self.agsls_config.basin_envelope_quantile_offset,
             basin_envelope_growth_pixels=self.agsls_config.basin_envelope_growth_pixels,
-            support_field=self._decision_support_field(),
+            support_field=self._support_field(),
         )
+        if not basins:
+            self._last_basin_count = 0
+            self._last_top_basin_score_gap = 0.0
+            return []
+
+        max_mass = max(float(basin.support_mass) for basin in basins)
+        max_area = max(max(int(basin.area), 1) for basin in basins)
         for basin in basins:
             scoring_mask = basin.core_mask if basin.core_mask is not None else basin.mask
-            basin.stability_score = float( np.mean( persistence[ scoring_mask ] ) ) if np.any( scoring_mask ) else 0.0
-        return score_basins( basins, self.agsls_config )
+            basin.stability_score = float(np.mean(persistence[scoring_mask])) if np.any(scoring_mask) else 0.0
+            norm_mass = float(basin.support_mass) / max(max_mass, 1e-12)
+            norm_area = float(basin.area) / max(max_area, 1)
+            if phase == "commit":
+                basin.combined_score = (
+                    self.agsls_config.commit_mass_weight * norm_mass
+                    + self.agsls_config.commit_density_weight * float(basin.alive_density)
+                    + self.agsls_config.commit_stability_weight * float(basin.stability_score)
+                    + self.agsls_config.commit_objective_weight * float(basin.objective_score)
+                    - self.agsls_config.commit_area_penalty * norm_area
+                )
+            else:
+                incumbent_bonus = 2.0 if basin.incumbent_in_envelope else 0.0
+                best_score = float(basin.best_objective_score) if basin.evaluated_count > 0 else 0.0
+                basin.combined_score = incumbent_bonus + best_score + 0.25 * norm_mass + 0.25 * float(basin.stability_score)
 
-    def _basin_metadata( self, basins: list[ Basin ] ) -> list[ dict[str, float | int | bool | list[ list[ float ] ]] ]:
-        payload: list[ dict[str, float | int | bool | list[ list[ float ] ]] ] = [ ]
-        for rank, basin in enumerate( basins, start=1 ):
-            payload.append(
-                {
-                    "rank": float( rank ),
-                    "score": float( basin.combined_score ),
-                    "alive_density": float( basin.alive_density ),
-                    "support_mass": float( basin.support_mass ),
-                    "bbox": basin.bbox_world.tolist(),
-                    "core_bbox": [] if basin.core_bbox_world is None else basin.core_bbox_world.tolist(),
-                    "evaluated_count": int( basin.evaluated_count ),
-                    "best_objective_score": float( basin.best_objective_score ),
-                    "mean_objective_score": float( basin.mean_objective_score ),
-                    "unexplored_fraction": float( basin.unexplored_fraction ),
-                    "incumbent_in_envelope": bool( basin.incumbent_in_envelope ),
-                    "better_than_incumbent": bool( basin.better_than_incumbent ),
-                }
-            )
-        return payload
-
-    def _basin_diagnostics( self, basin: Basin ) -> dict[ str, float | int | bool | list[ list[ float ] ] ]:
-        return {
-            "score": float( basin.combined_score ),
-            "bbox": basin.bbox_world.tolist(),
-            "core_bbox": [] if basin.core_bbox_world is None else basin.core_bbox_world.tolist(),
-            "area": int( basin.area ),
-            "support_mass": float( basin.support_mass ),
-            "alive_density": float( basin.alive_density ),
-            "stability_score": float( basin.stability_score ),
-            "objective_score": float( basin.objective_score ),
-            "evaluated_count": int( basin.evaluated_count ),
-            "best_objective_score": float( basin.best_objective_score ),
-            "mean_objective_score": float( basin.mean_objective_score ),
-            "unexplored_fraction": float( basin.unexplored_fraction ),
-            "incumbent_in_envelope": bool( basin.incumbent_in_envelope ),
-            "better_than_incumbent": bool( basin.better_than_incumbent ),
-        }
-
-    def _record_decision_trace(
-        self,
-        *,
-        box_id: int,
-        accepted: bool,
-        decision_reason: str,
-        evaluations_before: int,
-        evaluations_after: int,
-        best_value_before: float,
-        best_value_after: float,
-        bounds_before: np.ndarray,
-        bounds_after: np.ndarray,
-        selected_basin: Basin | None,
-        incumbent_point_before_zoom: np.ndarray,
-        late_stage_mode: bool = False,
-        intensification_rounds: int = 0,
-        projected_shrink_ratio: float = 1.0,
-        focus_mask_coverage: float = 0.0,
-        late_stage_exit_reason: str = "none",
-        microgrid_summary: dict[ str, object ] | None = None,
-        translation_summary: dict[ str, object ] | None = None,
-        pattern_search_summary: dict[ str, object ] | None = None,
-    ) -> None:
-        box_round_index = int( self._box_round_counts.get( box_id, 0 ) ) + 1
-        self._box_round_counts[ box_id ] = box_round_index
-        late_stage_payload = self._late_stage_summary_payload(
-            box_id=box_id,
-            microgrid_summary=microgrid_summary,
-            translation_summary=translation_summary,
-            pattern_search_summary=pattern_search_summary,
-        )
-        self._decision_trace.append(
-            {
-                "zoom_index": int( box_id ),
-                "box_id": int( box_id ),
-                "box_round_index": box_round_index,
-                "accepted": bool( accepted ),
-                "decision_reason": str( decision_reason ),
-                "evaluations_before": int( evaluations_before ),
-                "evaluations_after": int( evaluations_after ),
-                "best_value_before": float( best_value_before ),
-                "best_value_after": float( best_value_after ),
-                "bounds_before": np.asarray( bounds_before, dtype=float ).tolist(),
-                "bounds_after": np.asarray( bounds_after, dtype=float ).tolist(),
-                "incumbent_point_before_zoom": np.asarray( incumbent_point_before_zoom, dtype=float ).tolist(),
-                "selected_basin_diagnostics": None if selected_basin is None else self._basin_diagnostics( selected_basin ),
-                "basin_count": int( self._last_basin_count ),
-                "top_basin_score_gap": float( self._last_top_basin_score_gap ),
-                "late_stage_mode": bool( late_stage_mode ),
-                "intensification_rounds": int( intensification_rounds ),
-                "projected_shrink_ratio": float( projected_shrink_ratio ),
-                "focus_mask_coverage": float( focus_mask_coverage ),
-                "late_stage_exit_reason": str( late_stage_exit_reason ),
-                **late_stage_payload,
-            }
-        )
-
-    def _late_stage_state( self, *, box_id: int, active_limit: int, bounds: np.ndarray ) -> dict[ str, float | int | bool ]:
-        signals = self.runtime_signals()
-        zoom_fraction = signals.zoom_fraction()
-        rounds = int( self._late_stage_round_counts.get( box_id, 0 ) )
-        if self.agsls_config.time_phased_enabled:
-            budget_fraction = signals.budget_fraction()
-            late = budget_fraction >= float( self.agsls_config.phase_commit_end_fraction )
-            return {
-                "zoom_fraction": float( zoom_fraction ),
-                "budget_fraction": float( budget_fraction ),
-                "plateau": False,
-                "small_box": False,
-                "late": bool( late ),
-                "intensification_rounds": rounds,
-                "late_stage_mode": bool( late or rounds > 0 ),
-            }
-        prior_box_rounds = int( self._box_round_counts.get( box_id, 0 ) )
-        plateau = prior_box_rounds > 0 and max( float( signals.global_improvement ), float( signals.stage_improvement ) ) <= self.agsls_config.late_stage_plateau_threshold
-        small_box = self._box_area_ratio( bounds ) <= 0.1
-        late = zoom_fraction >= self.agsls_config.late_stage_zoom_fraction_threshold
-        return {
-            "zoom_fraction": float( zoom_fraction ),
-            "plateau": bool( plateau ),
-            "small_box": bool( small_box ),
-            "late": bool( late ),
-            "intensification_rounds": rounds,
-            "late_stage_mode": bool( late or plateau or small_box or rounds > 0 ),
-        }
-
-    def _late_stage_step_batch( self, base_batch: int, *, late_stage_state: dict[ str, float | int | bool ] ) -> int:
-        if not bool( late_stage_state.get( "late_stage_mode", False ) ):
-            return int( base_batch )
-        return max( 1, min( int( base_batch ), int( self.agsls_config.late_stage_eval_batch ) ) )
-
-    def _projected_shrink_ratio( self, old_bounds: np.ndarray, new_bounds: np.ndarray ) -> float:
-        return self._bounds_area( new_bounds ) / max( self._bounds_area( old_bounds ), 1e-12 )
-
-    def _late_stage_focus_mask( self, basin: Basin ) -> tuple[ np.ndarray, np.ndarray, float ]:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        base_mask = np.asarray( basin.mask, dtype=bool )
-        explored_mask = base_mask & np.asarray( state.evaluated_mask, dtype=bool )
-        support = self._decision_support_field()
-        if not np.any( explored_mask ):
-            coverage = 1.0 if np.any( base_mask ) else 0.0
-            return base_mask.copy(), np.asarray( support, dtype=float ), float( coverage )
-        objective_scores = np.asarray( state.objective_field, dtype=float )[ explored_mask ]
-        candidate_rows, candidate_cols = np.nonzero( explored_mask )
-        elite_k = min( int( self.agsls_config.late_stage_elite_k ), int( candidate_rows.size ) )
-        top_order = np.argsort( objective_scores )[ -elite_k: ]
-        elite_rows = candidate_rows[ top_order ]
-        elite_cols = candidate_cols[ top_order ]
-        row_grid, col_grid = np.indices( base_mask.shape )
-        radius = max( int( self.agsls_config.late_stage_focus_radius_cells ), 1 )
-        elite_proximity = np.zeros( base_mask.shape, dtype=float )
-        focus_mask = np.zeros( base_mask.shape, dtype=bool )
-        for row, col in zip( elite_rows, elite_cols ):
-            distance = np.sqrt( ( row_grid - int( row ) ) ** 2 + ( col_grid - int( col ) ) ** 2 )
-            elite_proximity = np.maximum( elite_proximity, np.clip( 1.0 - ( distance / float( radius ) ), 0.0, 1.0 ) )
-        focus_mask |= elite_proximity > 0.0
-        if basin.core_mask is not None:
-            focus_mask |= np.asarray( basin.core_mask, dtype=bool )
-        focus_mask &= base_mask
-        if not np.any( focus_mask ):
-            focus_mask = base_mask.copy()
-        coverage = float( np.count_nonzero( focus_mask ) ) / max( int( np.count_nonzero( base_mask ) ), 1 )
-        return focus_mask, elite_proximity, coverage
-
-    def _late_stage_score_field( self, basin: Basin ) -> tuple[ np.ndarray, np.ndarray, float ]:
-        focus_mask, elite_proximity, coverage = self._late_stage_focus_mask( basin )
-        support = self._decision_support_field()
-        if self.engine.config.exploitation_score_late_stage:
-            score_field = 0.75 * self.engine.exploitation_score_field() + 0.25 * elite_proximity
-        else:
-            score_field = 0.50 * self.engine.exploration_score_field() + 0.25 * support + 0.25 * elite_proximity
-        return focus_mask, score_field, coverage
-
-    def _late_stage_translation_target( self, basin: Basin ) -> tuple[ np.ndarray, str ]:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        mask = np.asarray( basin.core_mask if basin.core_mask is not None else basin.mask, dtype=bool )
-        evaluated_mask = mask & np.asarray( state.evaluated_mask, dtype=bool )
-        if np.any( evaluated_mask ):
-            rows, cols = np.nonzero( evaluated_mask )
-            values = np.asarray( state.objective_values[ rows, cols ], dtype=float )
-            primary = -values if self.engine.config.maximize else values
-            order = np.lexsort( ( cols, rows, primary ) )
-            elite_k = min( int( self.agsls_config.late_stage_elite_k ), int( order.size ) )
-            selected_offsets = order[ :elite_k ]
-            weights = np.arange( elite_k, 0, -1, dtype=float )
-            elite_points = np.asarray(
-                [
-                    self.engine._pixel_center( int( rows[ offset ] ), int( cols[ offset ] ), state.bounds )
-                    for offset in selected_offsets
-                ],
-                dtype=float,
-            )
-            target = np.average( elite_points, axis=0, weights=weights )
-            return np.asarray( target, dtype=float ), "elite_weighted"
-        if basin.basin_best_point is not None:
-            return np.asarray( basin.basin_best_point, dtype=float ), "basin_best"
-        return np.asarray( basin.centroid_world, dtype=float ), "centroid"
-
-    def _run_late_stage_translation(
-        self,
-        basin: Basin,
-        old_bounds: np.ndarray,
-        standard_shrink_bounds: np.ndarray,
-        trigger_reason: str,
-    ) -> tuple[ np.ndarray, dict[ str, object ] ] | None:
-        if not self.agsls_config.late_stage_translation_enabled:
-            return None
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        old_widths = np.asarray( old_bounds, dtype=float )[ :, 1 ] - np.asarray( old_bounds, dtype=float )[ :, 0 ]
-        if np.any( old_widths <= 0.0 ):
-            return None
-        target_point, target_kind = self._late_stage_translation_target( basin )
-        source_point = np.mean( np.asarray( old_bounds, dtype=float ), axis=1 )
-        target_offset = np.asarray( target_point, dtype=float ) - np.asarray( source_point, dtype=float )
-        normalized_offset = np.abs( target_offset ) / np.maximum( old_widths, 1e-12 )
-        if float( np.max( normalized_offset ) ) < float( self.agsls_config.late_stage_translation_min_offset_fraction ):
-            return None
-        movement_cap = float( self.agsls_config.late_stage_translation_step_fraction ) * old_widths
-        applied_step = np.clip( target_offset, -movement_cap, movement_cap )
-        if np.allclose( applied_step, 0.0 ):
-            return None
-        translated_center = np.asarray( source_point, dtype=float ) + applied_step
-        standard_widths = np.asarray( standard_shrink_bounds, dtype=float )[ :, 1 ] - np.asarray( standard_shrink_bounds, dtype=float )[ :, 0 ]
-        candidate_bounds = self._centered_bounds( translated_center, standard_widths, old_bounds )
-        incumbent_point = None
-        if not basin.better_than_incumbent and self._point_in_bounds( state.best_point, old_bounds ):
-            incumbent_point = np.asarray( state.best_point, dtype=float )
-        refined_bounds = self._finalize_zoom_bounds(
-            candidate_bounds,
-            translated_center,
-            old_bounds,
-            anchor_point=np.asarray( target_point, dtype=float ),
-            incumbent_point=incumbent_point,
-        )
-        if np.allclose( refined_bounds, old_bounds ):
-            return None
-        summary = {
-            "translation_ran": True,
-            "translation_trigger_reason": str( trigger_reason ),
-            "translation_target_kind": str( target_kind ),
-            "translation_source_point": np.asarray( source_point, dtype=float ).tolist(),
-            "translation_target_point": np.asarray( target_point, dtype=float ).tolist(),
-            "translation_applied_vector": np.asarray( applied_step, dtype=float ).tolist(),
-            "translation_refined_bounds": np.asarray( refined_bounds, dtype=float ).tolist(),
-        }
-        return refined_bounds, summary
-
-    def _evaluate_arbitrary_points( self, points: np.ndarray ) -> np.ndarray:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        resolved_points = np.asarray( points, dtype=float )
-        if resolved_points.size == 0:
-            return np.asarray( [ ], dtype=float )
-        resolved_points = np.reshape( resolved_points, ( -1, 2 ) )
-        values = np.asarray( [ float( self.objective( point ) ) for point in resolved_points ], dtype=float )
-        state.evaluations += int( values.size )
-        for point, value in zip( resolved_points, values ):
-            candidate = np.asarray( point, dtype=float )
-            candidate_value = float( value )
-            if not np.isfinite( state.box_best_value ) or self.engine._is_better( candidate_value, float( state.box_best_value ) ):
-                state.box_best_point = candidate.copy()
-                state.box_best_value = candidate_value
-            if not np.isfinite( state.local_best_value ) or self.engine._is_better( candidate_value, float( state.local_best_value ) ):
-                state.local_best_point = candidate.copy()
-                state.local_best_value = candidate_value
-            if not np.isfinite( state.best_value ) or self.engine._is_better( candidate_value, float( state.best_value ) ):
-                state.best_point = candidate.copy()
-                state.best_value = candidate_value
-        self.engine._update_improvement_trackers()
-        self._sync_latest_snapshot_state()
-        return values
-
-    @staticmethod
-    def _periodic_local_search_budget_split( seed_count: int, total_budget: int ) -> tuple[ int, ... ]:
-        if seed_count <= 0 or total_budget <= 0:
-            return tuple()
-        base, remainder = divmod( int( total_budget ), int( seed_count ) )
-        return tuple( base + ( 1 if index < remainder else 0 ) for index in range( int( seed_count ) ) )
-
-    def _late_stage_periodic_elite_seeds( self, current_bounds: np.ndarray ) -> list[ np.ndarray ]:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        if not np.any( state.evaluated_mask ):
-            return [ ]
-        rows, cols = np.nonzero( state.evaluated_mask )
-        values = np.asarray( state.objective_values[ rows, cols ], dtype=float )
-        primary = -values if self.engine.config.maximize else values
-        order = np.lexsort( ( cols, rows, primary ) )
-        elite_k = min( int( self.agsls_config.late_stage_elite_k ), int( order.size ) )
-        return [
-            self.engine._pixel_center( int( rows[ offset ] ), int( cols[ offset ] ), current_bounds )
-            for offset in order[ :elite_k ]
+        eligible = [
+            basin
+            for basin in basins
+            if basin.area >= self.agsls_config.min_basin_cells and basin.alive_density >= self.agsls_config.min_alive_density
         ]
-
-    def _run_periodic_local_search_from_seed(
-        self,
-        seed: np.ndarray,
-        current_bounds: np.ndarray,
-        *,
-        initial_step: np.ndarray,
-        min_step: np.ndarray,
-        shrink: float,
-        max_iterations: int,
-        evaluation_budget: int,
-    ) -> dict[ str, object ] | None:
-        seed_value, reused = self._reuse_evaluated_value( seed, current_bounds )
-        if not reused:
-            return None
-        current_point = np.asarray( seed, dtype=float ).copy()
-        current_value = float( seed_value )
-        starting_value = float( seed_value )
-        step = np.asarray( initial_step, dtype=float ).copy()
-        fresh_spent = 0
-        iterations = 0
-        while iterations < int( max_iterations ) and fresh_spent < int( evaluation_budget ):
-            if np.all( step <= min_step ):
-                break
-            iterations += 1
-            best_trial_point: np.ndarray | None = None
-            best_trial_value = float( current_value )
-            terminated_on_budget = False
-            offsets = np.asarray(
-                [
-                    [ step[ 0 ], 0.0 ],
-                    [ -step[ 0 ], 0.0 ],
-                    [ 0.0, step[ 1 ] ],
-                    [ 0.0, -step[ 1 ] ],
-                ],
-                dtype=float,
-            )
-            for offset in offsets:
-                if fresh_spent >= int( evaluation_budget ):
-                    break
-                if self._bounded_evaluation_batch( 1 ) < 1:
-                    terminated_on_budget = True
-                    break
-                candidate = current_point + offset
-                if not self._point_in_bounds( candidate, current_bounds ):
-                    continue
-                values = self._evaluate_arbitrary_points( np.asarray( candidate, dtype=float ).reshape( 1, 2 ) )
-                if values.size == 0:
-                    terminated_on_budget = True
-                    break
-                fresh_spent += 1
-                candidate_value = float( values[ 0 ] )
-                if self.engine._is_better( candidate_value, best_trial_value ):
-                    best_trial_value = candidate_value
-                    best_trial_point = np.asarray( candidate, dtype=float ).copy()
-            if terminated_on_budget:
-                break
-            if best_trial_point is not None:
-                current_point = best_trial_point
-                current_value = float( best_trial_value )
-            else:
-                step = step * float( shrink )
-        return {
-            "point": current_point.copy(),
-            "value": float( current_value ),
-            "fresh_spent": int( fresh_spent ),
-            "improved": bool( self.engine._is_better( current_value, starting_value ) ),
-        }
-
-    def _run_periodic_downhill_local_search(
-        self,
-        current_bounds: np.ndarray,
-        seeds: list[ np.ndarray ],
-    ) -> dict[ str, object ] | None:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        if not seeds:
-            return None
-        current_widths = np.asarray( current_bounds, dtype=float )[ :, 1 ] - np.asarray( current_bounds, dtype=float )[ :, 0 ]
-        if np.any( current_widths <= 0.0 ):
-            return None
-        total_budget = self._bounded_evaluation_batch( self.agsls_config.late_stage_periodic_local_search_max_evaluations )
-        if total_budget <= 0:
-            return None
-        budgets = self._periodic_local_search_budget_split( len( seeds ), total_budget )
-        initial_step = float( self.agsls_config.late_stage_periodic_local_search_initial_step_fraction ) * current_widths
-        min_step = float( self.agsls_config.late_stage_periodic_local_search_min_step_fraction ) * current_widths
-        shrink = float( self.agsls_config.late_stage_periodic_local_search_shrink )
-        max_iterations = int( self.agsls_config.late_stage_periodic_local_search_max_iterations )
-        best_value_before = float( state.best_value )
-        best_result: dict[ str, object ] | None = None
-        total_fresh_spent = 0
-        for seed, seed_budget in zip( seeds, budgets ):
-            result = self._run_periodic_local_search_from_seed(
-                np.asarray( seed, dtype=float ),
-                current_bounds,
-                initial_step=initial_step,
-                min_step=min_step,
-                shrink=shrink,
-                max_iterations=max_iterations,
-                evaluation_budget=int( seed_budget ),
-            )
-            if result is None:
-                continue
-            total_fresh_spent += int( result[ "fresh_spent" ] )
-            if best_result is None or self.engine._is_better( float( result[ "value" ] ), float( best_result[ "value" ] ) ):
-                best_result = result
-            if self._bounded_evaluation_batch( 1 ) < 1:
-                break
-        if best_result is None:
-            return None
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        return {
-            "periodic_local_search_last_step_index": int( state.step_index ),
-            "periodic_local_search_last_seed_count": int( len( seeds ) ),
-            "periodic_local_search_last_best_point": np.asarray( best_result[ "point" ], dtype=float ).tolist(),
-            "periodic_local_search_last_best_value": float( best_result[ "value" ] ),
-            "periodic_local_search_last_improved": bool( self.engine._is_better( float( state.best_value ), best_value_before ) ),
-            "periodic_local_search_last_evaluations_spent": int( total_fresh_spent ),
-        }
-
-    def _store_periodic_local_search_summary( self, box_id: int, summary: dict[ str, object ] ) -> dict[ str, object ]:
-        payload = self._periodic_local_search_summary_payload( box_id=box_id )
-        payload[ "periodic_local_search_ran" ] = True
-        payload[ "periodic_local_search_runs" ] = int( payload.get( "periodic_local_search_runs", 0 ) ) + 1
-        payload[ "periodic_local_search_total_evaluations_spent" ] = (
-            int( payload.get( "periodic_local_search_total_evaluations_spent", 0 ) )
-            + int( summary.get( "periodic_local_search_last_evaluations_spent", 0 ) )
+        eligible.sort(key=lambda basin: float(basin.combined_score), reverse=True)
+        self._last_basin_count = len(eligible)
+        self._last_top_basin_score_gap = (
+            float(eligible[0].combined_score - eligible[1].combined_score) if len(eligible) >= 2 else 0.0
         )
-        payload.update( summary )
-        self._periodic_local_search_summaries[ int( box_id ) ] = payload
-        return payload
-
-    def _mark_latest_snapshot_periodic_local_search( self, box_id: int ) -> None:
-        if not self.engine.snapshots:
-            return
-        self._sync_latest_snapshot_state()
-        snapshot = self.engine.snapshots[ -1 ]
-        snapshot.metadata[ "late_stage_mode" ] = True
-        snapshot.metadata.update( self._late_stage_summary_payload( box_id=box_id ) )
-
-    def _maybe_run_periodic_local_search(
-        self,
-        *,
-        box_id: int,
-        late_stage_state: dict[ str, float | int | bool ],
-    ) -> dict[ str, object ] | None:
-        if not self.agsls_config.late_stage_periodic_local_search_enabled:
-            return None
-        if not bool( late_stage_state.get( "late_stage_mode", False ) ):
-            return None
-        step_count = int( self._late_stage_step_counts.get( box_id, 0 ) ) + 1
-        self._late_stage_step_counts[ int( box_id ) ] = step_count
-        interval = int( self.agsls_config.late_stage_periodic_local_search_interval_steps )
-        if interval <= 0 or step_count % interval != 0:
-            return None
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        current_bounds = state.bounds.copy()
-        seeds = self._late_stage_periodic_elite_seeds( current_bounds )
-        summary = self._run_periodic_downhill_local_search( current_bounds, seeds )
-        if summary is not None:
-            summary = self._store_periodic_local_search_summary( box_id, summary )
-        self._mark_latest_snapshot_periodic_local_search( box_id )
-        return summary
-
-    def _late_stage_microgrid_candidates( self, basin: Basin, current_bounds: np.ndarray ) -> list[ dict[ str, object ] ]:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        limit = max( int( self.agsls_config.late_stage_microgrid_centers ), 1 )
-        candidates: list[ dict[ str, object ] ] = [ ]
-
-        def add_candidate( kind: str, point: np.ndarray | None ) -> bool:
-            if point is None:
-                return False
-            resolved_point = np.asarray( point, dtype=float )
-            if not self._point_in_bounds( resolved_point, current_bounds ):
-                return False
-            for existing in candidates:
-                if np.allclose( np.asarray( existing[ "point" ], dtype=float ), resolved_point, atol=1e-12, rtol=0.0 ):
-                    return False
-            candidates.append( {"kind": str( kind ), "point": resolved_point.copy()} )
-            return True
-
-        add_candidate( "basin_best", basin.basin_best_point )
-        if len( candidates ) < limit:
-            add_candidate( "incumbent", state.best_point )
-        mask = basin.core_mask if basin.core_mask is not None else basin.mask
-        evaluated_mask = np.asarray( mask, dtype=bool ) & np.asarray( state.evaluated_mask, dtype=bool )
-        if np.any( evaluated_mask ):
-            rows, cols = np.nonzero( evaluated_mask )
-            values = np.asarray( state.objective_values[ rows, cols ], dtype=float )
-            order = np.argsort( values )
-            if self.engine.config.maximize:
-                order = order[ ::-1 ]
-            elite_rank = 1
-            for offset in order:
-                if len( candidates ) >= limit:
-                    break
-                point = self.engine._pixel_center( int( rows[ offset ] ), int( cols[ offset ] ), state.bounds )
-                added = add_candidate( f"elite_{ elite_rank }", point )
-                if added:
-                    elite_rank += 1
-        return candidates[ :limit ]
-
-    def _late_stage_microgrid_sample_bounds( self, center: np.ndarray, current_bounds: np.ndarray ) -> np.ndarray:
-        current_widths = np.asarray( current_bounds, dtype=float )[ :, 1 ] - np.asarray( current_bounds, dtype=float )[ :, 0 ]
-        min_zoom_widths = self._minimum_zoom_widths( current_bounds )
-        sample_widths = np.maximum(
-            self.agsls_config.late_stage_microgrid_side_fraction * current_widths,
-            min_zoom_widths,
-        )
-        return self._centered_bounds( center, sample_widths, current_bounds )
-
-    def _late_stage_microgrid_lattice( self, bounds: np.ndarray ) -> np.ndarray:
-        resolution = int( self.agsls_config.late_stage_microgrid_resolution )
-        x_values = np.linspace( float( bounds[ 0, 0 ] ), float( bounds[ 0, 1 ] ), resolution, dtype=float )
-        y_values = np.linspace( float( bounds[ 1, 0 ] ), float( bounds[ 1, 1 ] ), resolution, dtype=float )
-        grid_x, grid_y = np.meshgrid( x_values, y_values, indexing="xy" )
-        return np.column_stack( ( grid_x.ravel(), grid_y.ravel() ) )
-
-    def _run_late_stage_microgrid( self, basin: Basin, current_bounds: np.ndarray ) -> tuple[ np.ndarray, dict[ str, object ] ] | None:
-        if not self.agsls_config.late_stage_microgrid_enabled:
-            return None
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        candidates = self._late_stage_microgrid_candidates( basin, current_bounds )
-        if not candidates:
-            return None
-        samples_per_center = int( self.agsls_config.late_stage_microgrid_resolution ) ** 2
-        total_samples = int( len( candidates ) * samples_per_center )
-        if self._bounded_evaluation_batch( total_samples ) < total_samples:
-            return None
-        incumbent_point = np.asarray( state.best_point, dtype=float )
-        baseline_best_value = float( state.best_value )
-        best_candidate: dict[ str, object ] | None = None
-        best_key: tuple[ float, float, float, float ] | None = None
-        for candidate_index, candidate in enumerate( candidates ):
-            center = np.asarray( candidate[ "point" ], dtype=float )
-            sample_bounds = self._late_stage_microgrid_sample_bounds( center, current_bounds )
-            lattice = self._late_stage_microgrid_lattice( sample_bounds )
-            values = self._evaluate_arbitrary_points( lattice )
-            order = np.argsort( values )
-            if self.engine.config.maximize:
-                order = order[ ::-1 ]
-            top_count = min( 4, len( order ) )
-            best_offset = int( order[ 0 ] )
-            top_values = values[ order[ :top_count ] ]
-            best_point = np.asarray( lattice[ best_offset ], dtype=float )
-            best_value = float( values[ best_offset ] )
-            mean_top_value = float( np.mean( top_values ) )
-            incumbent_distance = (
-                float( np.linalg.norm( best_point - incumbent_point ) )
-                if self._point_in_bounds( incumbent_point, current_bounds )
-                else 0.0
-            )
-            candidate_key = (
-                self._objective_value_key( best_value ),
-                self._objective_value_key( mean_top_value ),
-                -incumbent_distance,
-                -float( candidate_index ),
-            )
-            if best_key is None or candidate_key > best_key:
-                best_key = candidate_key
-                best_candidate = {
-                    "kind": str( candidate[ "kind" ] ),
-                    "sample_bounds": sample_bounds.copy(),
-                    "best_point": best_point.copy(),
-                    "best_value": best_value,
-                }
-        if best_candidate is None:
-            return None
-        sample_bounds = np.asarray( best_candidate[ "sample_bounds" ], dtype=float )
-        refined_widths = 0.5 * ( sample_bounds[ :, 1 ] - sample_bounds[ :, 0 ] )
-        best_point = np.asarray( best_candidate[ "best_point" ], dtype=float )
-        raw_refined_bounds = self._centered_bounds( best_point, refined_widths, current_bounds )
-        preserve_incumbent = (
-            self._point_in_bounds( incumbent_point, current_bounds )
-            and not self.engine._is_better( float( best_candidate[ "best_value" ] ), baseline_best_value )
-        )
-        refined_bounds = self._finalize_zoom_bounds(
-            raw_refined_bounds,
-            best_point,
-            current_bounds,
-            anchor_point=best_point,
-            incumbent_point=incumbent_point if preserve_incumbent else None,
-        )
-        summary = {
-            "microgrid_ran": True,
-            "microgrid_candidate_centers": [ str( candidate[ "kind" ] ) for candidate in candidates ],
-            "microgrid_sample_count_total": total_samples,
-            "microgrid_sample_count_per_center": samples_per_center,
-            "microgrid_winning_center_kind": str( best_candidate[ "kind" ] ),
-            "microgrid_winning_point": best_point.tolist(),
-            "microgrid_winning_value": float( best_candidate[ "best_value" ] ),
-            "microgrid_refined_bounds": refined_bounds.tolist(),
-        }
-        return refined_bounds, summary
-
-    def _reuse_evaluated_value( self, point: np.ndarray, bounds: np.ndarray ) -> tuple[ float, bool ]:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        resolved_point = np.asarray( point, dtype=float )
-        resolved_bounds = np.asarray( bounds, dtype=float )
-        if resolved_point.shape != ( 2, ) or not np.all( np.isfinite( resolved_point ) ):
-            return float( "nan" ), False
-        if not np.all( resolved_point >= resolved_bounds[ :, 0 ] ) or not np.all( resolved_point <= resolved_bounds[ :, 1 ] ):
-            return float( "nan" ), False
-        height, width = self.engine.config.grid_shape
-        widths = resolved_bounds[ :, 1 ] - resolved_bounds[ :, 0 ]
-        if np.any( widths <= 0.0 ):
-            return float( "nan" ), False
-        col_float = ( resolved_point[ 0 ] - resolved_bounds[ 0, 0 ] ) / widths[ 0 ] * width - 0.5
-        row_float = ( resolved_point[ 1 ] - resolved_bounds[ 1, 0 ] ) / widths[ 1 ] * height - 0.5
-        col = int( np.clip( np.round( col_float ), 0, width - 1 ) )
-        row = int( np.clip( np.round( row_float ), 0, height - 1 ) )
-        if not bool( state.evaluated_mask[ row, col ] ):
-            return float( "nan" ), False
-        pixel_center = self.engine._pixel_center( row, col, resolved_bounds )
-        cell_widths = np.asarray( [ widths[ 0 ] / width, widths[ 1 ] / height ], dtype=float )
-        tolerance = float( self.agsls_config.late_stage_pattern_search_reuse_tolerance_cells ) * cell_widths
-        if np.any( np.abs( resolved_point - pixel_center ) > tolerance ):
-            return float( "nan" ), False
-        return float( state.objective_values[ row, col ] ), True
-
-    def _pattern_search_seed( self, basin: Basin, current_bounds: np.ndarray ) -> tuple[ np.ndarray, str ] | None:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        if np.all( np.isfinite( state.best_point ) ) and self._point_in_bounds( state.best_point, current_bounds ):
-            return np.asarray( state.best_point, dtype=float ).copy(), "incumbent"
-        if basin.basin_best_point is not None:
-            seed = np.asarray( basin.basin_best_point, dtype=float )
-            if self._point_in_bounds( seed, current_bounds ):
-                return seed.copy(), "basin_best"
-        if basin.centroid_world is not None:
-            seed = np.asarray( basin.centroid_world, dtype=float )
-            if self._point_in_bounds( seed, current_bounds ):
-                return seed.copy(), "centroid"
-        return None
-
-    def _pattern_search_evaluate( self, point: np.ndarray, current_bounds: np.ndarray ) -> tuple[ float, bool ] | None:
-        """Return (value, reused). Returns None when no fresh budget and no reuse."""
-        cached_value, reused = self._reuse_evaluated_value( point, current_bounds )
-        if reused:
-            return cached_value, True
-        if self._bounded_evaluation_batch( 1 ) < 1:
-            return None
-        values = self._evaluate_arbitrary_points( np.asarray( point, dtype=float ).reshape( 1, 2 ) )
-        if values.size == 0:
-            return None
-        return float( values[ 0 ] ), False
-
-    def _run_late_stage_pattern_search( self, basin: Basin, current_bounds: np.ndarray ) -> tuple[ np.ndarray, dict[ str, object ] ] | None:
-        if self.agsls_config.late_stage_exploiter != "pattern_search":
-            return None
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        current_widths = np.asarray( current_bounds, dtype=float )[ :, 1 ] - np.asarray( current_bounds, dtype=float )[ :, 0 ]
-        if np.any( current_widths <= 0.0 ):
-            return None
-        seed_result = self._pattern_search_seed( basin, current_bounds )
-        if seed_result is None:
-            return None
-        seed, seed_kind = seed_result
-        seed_evaluation = self._pattern_search_evaluate( seed, current_bounds )
-        if seed_evaluation is None:
-            return None
-        seed_value, seed_reused = seed_evaluation
-        starting_value = seed_value
-        step = float( self.agsls_config.late_stage_pattern_search_initial_step_fraction ) * current_widths
-        min_step = float( self.agsls_config.late_stage_pattern_search_min_step_fraction ) * current_widths
-        shrink = float( self.agsls_config.late_stage_pattern_search_shrink )
-        max_iterations = int( self.agsls_config.late_stage_pattern_search_max_iterations )
-        max_fresh = int( self.agsls_config.late_stage_pattern_search_max_evaluations )
-        fresh_spent = 0 if seed_reused else 1
-        reused_hits = 1 if seed_reused else 0
-        iterations = 0
-        improved = False
-        terminated_on_budget = False
-        while iterations < max_iterations:
-            if np.all( step <= min_step ):
-                break
-            iterations += 1
-            trial_offsets = np.asarray(
-                [ [ step[ 0 ], 0.0 ], [ -step[ 0 ], 0.0 ], [ 0.0, step[ 1 ] ], [ 0.0, -step[ 1 ] ] ],
-                dtype=float,
-            )
-            best_trial_point = None
-            best_trial_value = seed_value
-            for offset in trial_offsets:
-                trial_point = seed + offset
-                if not self._point_in_bounds( trial_point, current_bounds ):
-                    continue
-                if fresh_spent >= max_fresh:
-                    # only attempt reused lookups once the fresh budget is gone
-                    cached_value, reused = self._reuse_evaluated_value( trial_point, current_bounds )
-                    if not reused:
-                        continue
-                    value = cached_value
-                    reused_hits += 1
-                else:
-                    outcome = self._pattern_search_evaluate( trial_point, current_bounds )
-                    if outcome is None:
-                        terminated_on_budget = True
-                        break
-                    value, was_reused = outcome
-                    if was_reused:
-                        reused_hits += 1
-                    else:
-                        fresh_spent += 1
-                if self.engine._is_better( value, best_trial_value ):
-                    best_trial_value = value
-                    best_trial_point = trial_point
-            if terminated_on_budget:
-                break
-            if best_trial_point is not None:
-                seed = np.asarray( best_trial_point, dtype=float )
-                seed_value = best_trial_value
-                improved = True
-            else:
-                step = step * shrink
-            if self._bounded_evaluation_batch( 1 ) < 1 and fresh_spent >= max_fresh:
-                break
-        if fresh_spent == 0 and reused_hits == 0 and not improved:
-            return None
-        final_widths = np.maximum( 2.0 * step, self._minimum_zoom_widths( current_bounds ) )
-        raw_refined_bounds = self._centered_bounds( seed, final_widths, current_bounds )
-        preserve_incumbent = not improved and self._point_in_bounds( state.best_point, current_bounds )
-        refined_bounds = self._finalize_zoom_bounds(
-            raw_refined_bounds,
-            seed,
-            current_bounds,
-            anchor_point=seed,
-            incumbent_point=np.asarray( state.best_point, dtype=float ) if preserve_incumbent else None,
-        )
-        summary = {
-            "pattern_search_ran": True,
-            "pattern_search_seed_kind": str( seed_kind ),
-            "pattern_search_iterations": int( iterations ),
-            "pattern_search_evaluations_spent": int( fresh_spent ),
-            "pattern_search_evaluations_reused": int( reused_hits ),
-            "pattern_search_final_step": step.tolist(),
-            "pattern_search_final_point": np.asarray( seed, dtype=float ).tolist(),
-            "pattern_search_final_value": float( seed_value ),
-            "pattern_search_refined_bounds": refined_bounds.tolist(),
-            "pattern_search_improved": bool( improved and self.engine._is_better( seed_value, starting_value ) ),
-        }
-        return refined_bounds, summary
-
-    def _run_late_stage_exploiter( self, basin: Basin, current_bounds: np.ndarray ) -> tuple[ str, tuple[ np.ndarray, dict[ str, object ] ] | None ]:
-        exploiter = str( self.agsls_config.late_stage_exploiter )
-        if exploiter == "pattern_search":
-            return "pattern_search", PatternSearchExploiter( self ).run( basin, current_bounds )
-        if exploiter == "microgrid":
-            return "microgrid", MicrogridExploiter( self ).run( basin, current_bounds )
-        return "none", None
-
-    def _should_intensify(
-        self,
-        *,
-        box_id: int,
-        basin: Basin,
-        old_bounds: np.ndarray,
-        new_bounds: np.ndarray,
-        late_stage_state: dict[ str, float | int | bool ],
-    ) -> tuple[ bool, float, str ]:
-        projected_shrink_ratio = self._projected_shrink_ratio( old_bounds, new_bounds )
-        rounds = int( late_stage_state.get( "intensification_rounds", 0 ) )
-        if rounds >= int( self.agsls_config.late_stage_max_rounds ):
-            return False, float( projected_shrink_ratio ), "max_rounds"
-        if self._bounded_evaluation_batch( self.agsls_config.late_stage_eval_batch ) <= 0:
-            return False, float( projected_shrink_ratio ), "budget_limit"
-        if np.allclose( new_bounds, old_bounds ):
-            return True, float( projected_shrink_ratio ), "no_shrink"
-        meaningful_better_zoom = bool( basin.better_than_incumbent ) and projected_shrink_ratio < float( self.agsls_config.late_stage_min_shrink_ratio )
-        if meaningful_better_zoom:
-            return False, float( projected_shrink_ratio ), "meaningful_shrink"
-        weak_shrink = projected_shrink_ratio >= float( self.agsls_config.late_stage_min_shrink_ratio )
-        if weak_shrink and bool( basin.incumbent_in_envelope ):
-            return True, float( projected_shrink_ratio ), "weak_shrink"
-        if bool( late_stage_state.get( "late_stage_mode", False ) ):
-            return True, float( projected_shrink_ratio ), "late_box"
-        return False, float( projected_shrink_ratio ), "direct_zoom"
-
-    def _run_late_stage_intensification( self, basin: Basin ) -> tuple[ int, float ]:
-        focus_mask, score_field, coverage = self._late_stage_score_field( basin )
-        batch_size = self._bounded_evaluation_batch( self.agsls_config.late_stage_eval_batch )
-        if batch_size <= 0:
-            return 0, float( coverage )
-        gained = int( self.engine.explore_top_pixels( batch_size, mask=focus_mask, score_field=score_field ) )
-        if gained == 0 and np.any( basin.mask ):
-            gained = int( self.engine.explore_top_pixels( batch_size, mask=basin.mask, score_field=score_field ) )
-            coverage = 1.0
-        return gained, float( coverage )
+        return eligible
 
     @staticmethod
-    def _final_polish_value_payload( value: float | None ) -> float | None:
-        if value is None or not np.isfinite( value ):
-            return None
-        return float( value )
+    def _centered_bounds(center: np.ndarray, widths: np.ndarray, ceiling_bounds: np.ndarray) -> np.ndarray:
+        resolved_center = np.asarray(center, dtype=float)
+        resolved_widths = np.asarray(widths, dtype=float)
+        ceiling = np.asarray(ceiling_bounds, dtype=float)
+        ceiling_widths = ceiling[:, 1] - ceiling[:, 0]
+        resolved_widths = np.minimum(resolved_widths, ceiling_widths)
+        bounds = np.empty((2, 2), dtype=float)
+        for axis in range(2):
+            width = float(resolved_widths[axis])
+            center_axis = float(np.clip(resolved_center[axis], ceiling[axis, 0], ceiling[axis, 1]))
+            half = 0.5 * width
+            lower = center_axis - half
+            upper = center_axis + half
+            if lower < ceiling[axis, 0]:
+                upper += ceiling[axis, 0] - lower
+                lower = ceiling[axis, 0]
+            if upper > ceiling[axis, 1]:
+                lower -= upper - ceiling[axis, 1]
+                upper = ceiling[axis, 1]
+            lower = max(float(ceiling[axis, 0]), lower)
+            upper = min(float(ceiling[axis, 1]), upper)
+            if not upper > lower:
+                lower, upper = AdaptiveGridSmoothLifeSearch._nearest_representable_interval(center_axis, ceiling[axis])
+            bounds[axis, 0] = lower
+            bounds[axis, 1] = upper
+        return bounds
 
     @staticmethod
-    def _final_polish_point_payload( point: np.ndarray | None ) -> list[ float ]:
-        if point is None:
-            return [ ]
-        resolved = np.asarray( point, dtype=float )
-        if resolved.shape != ( 2, ) or not np.all( np.isfinite( resolved ) ):
-            return [ ]
-        return resolved.tolist()
+    def _nearest_representable_interval(center: float, ceiling: np.ndarray) -> tuple[float, float]:
+        lower_limit = float(ceiling[0])
+        upper_limit = float(ceiling[1])
+        center = float(np.clip(center, lower_limit, upper_limit))
+        lower = float(np.nextafter(center, -np.inf))
+        upper = float(np.nextafter(center, np.inf))
+        if lower < lower_limit:
+            lower = center
+        if upper > upper_limit:
+            upper = center
+        if upper > lower:
+            return lower, upper
+        if center > lower_limit:
+            lower = float(np.nextafter(center, -np.inf))
+            if center > lower:
+                return max(lower_limit, lower), center
+        if center < upper_limit:
+            upper = float(np.nextafter(center, np.inf))
+            if upper > center:
+                return center, min(upper_limit, upper)
+        return center, center
 
-    def _final_polish_summary(
-        self,
-        *,
-        enabled: bool,
-        ran: bool,
-        start_point: np.ndarray | None,
-        start_value: float | None,
-        final_point: np.ndarray | None,
-        final_value: float | None,
-        evaluations_spent: int,
-        iterations: int,
-        exit_reason: str,
-        kind: str = "fd_bfgs",
-    ) -> dict[ str, object ]:
-        return {
-            "enabled": bool( enabled ),
-            "ran": bool( ran ),
-            "kind": str( kind ),
-            "start_point": self._final_polish_point_payload( start_point ),
-            "start_value": self._final_polish_value_payload( start_value ),
-            "final_point": self._final_polish_point_payload( final_point ),
-            "final_value": self._final_polish_value_payload( final_value ),
-            "evaluations_spent": int( evaluations_spent ),
-            "iterations": int( iterations ),
-            "exit_reason": str( exit_reason ),
-        }
+    @staticmethod
+    def _bounds_area_for_progress(bounds: np.ndarray) -> float:
+        widths = np.asarray(bounds, dtype=float)[:, 1] - np.asarray(bounds, dtype=float)[:, 0]
+        if not np.all(np.isfinite(widths)) or np.any(widths <= 0.0):
+            return float("nan")
+        return float(widths[0] * widths[1])
 
-    def _store_final_polish_summary( self, summary: dict[ str, object ] ) -> dict[ str, object ]:
-        self._sync_latest_snapshot_state()
-        if self.engine.snapshots:
-            self.engine.snapshots[ -1 ].metadata[ "final_polish" ] = dict( summary )
-        return summary
-
-    def _final_polish_loss( self, value: float ) -> float:
-        return -float( value ) if self.engine.config.maximize else float( value )
-
-    def _final_polish_bounds( self, point: np.ndarray ) -> np.ndarray | None:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        current_bounds = np.asarray( state.bounds, dtype=float )
-        if self._point_in_bounds( point, current_bounds ):
-            return current_bounds.copy()
-        original_bounds = np.asarray( self.original_bounds, dtype=float )
-        if self._point_in_bounds( point, original_bounds ):
-            return original_bounds.copy()
-        return None
-
-    def _run_final_polish( self ) -> dict[ str, object ]:
-        """End-of-run polish — wrapper for backward-compat metadata storage."""
-
-        summary = self._run_polish(
-            enabled=self.agsls_config.final_polish_enabled,
-            max_evaluations=int( self.agsls_config.final_polish_max_evaluations ),
-            kind="fd_bfgs",
-        )
-        return self._store_final_polish_summary( summary )
-
-    def _run_inter_zoom_polish( self ) -> dict[ str, object ]:
-        """Bounded BFGS polish run between accepted zooms; updates engine incumbent."""
-
-        summary = self._run_polish(
-            enabled=self.agsls_config.inter_zoom_polish_enabled,
-            max_evaluations=int( self.agsls_config.inter_zoom_polish_max_evaluations ),
-            kind="fd_bfgs_inter_zoom",
-        )
-        self._inter_zoom_polish_history.append( dict( summary ) )
-        if self.zoom_events:
-            self.zoom_events[ -1 ].diagnostics[ "inter_zoom_polish" ] = dict( summary )
-        return summary
-
-    def _run_polish(
-        self,
-        *,
-        enabled: bool,
-        max_evaluations: int,
-        kind: str,
-    ) -> dict[ str, object ]:
-        """Bounded finite-difference BFGS polish around ``state.best_point``.
-
-        Shared body for the end-of-run polish (R6) and the inter-zoom polish (R7).
-        Caller is responsible for storing the returned summary into the appropriate
-        metadata bucket (e.g. last snapshot's ``final_polish``, or
-        ``_inter_zoom_polish_history``).
-        """
-
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        start_point = state.best_point.copy()
-        start_value = float( state.best_value )
-        if not enabled:
-            return self._final_polish_summary(
-                enabled=False,
-                ran=False,
-                start_point=start_point,
-                start_value=start_value,
-                final_point=state.best_point.copy(),
-                final_value=float( state.best_value ),
-                evaluations_spent=0,
-                iterations=0,
-                exit_reason="disabled",
-                kind=kind,
-            )
-        if start_point.shape != ( 2, ) or not np.all( np.isfinite( start_point ) ) or not np.isfinite( start_value ):
-            return self._final_polish_summary(
-                enabled=True,
-                ran=False,
-                start_point=start_point,
-                start_value=start_value,
-                final_point=state.best_point.copy(),
-                final_value=float( state.best_value ),
-                evaluations_spent=0,
-                iterations=0,
-                exit_reason="invalid_seed",
-                kind=kind,
-            )
-        bounds = self._final_polish_bounds( start_point )
-        if bounds is None:
-            return self._final_polish_summary(
-                enabled=True,
-                ran=False,
-                start_point=start_point,
-                start_value=start_value,
-                final_point=state.best_point.copy(),
-                final_value=float( state.best_value ),
-                evaluations_spent=0,
-                iterations=0,
-                exit_reason="invalid_seed",
-                kind=kind,
-            )
-        widths = bounds[ :, 1 ] - bounds[ :, 0 ]
-        if np.any( widths <= 0.0 ) or not np.all( np.isfinite( widths ) ):
-            return self._final_polish_summary(
-                enabled=True,
-                ran=False,
-                start_point=start_point,
-                start_value=start_value,
-                final_point=state.best_point.copy(),
-                final_value=float( state.best_value ),
-                evaluations_spent=0,
-                iterations=0,
-                exit_reason="invalid_seed",
-                kind=kind,
-            )
-        remaining = self._remaining_evaluations()
-        if remaining is not None:
-            max_evaluations = min( int( max_evaluations ), int( remaining ) )
-        if max_evaluations < 5:
-            return self._final_polish_summary(
-                enabled=True,
-                ran=False,
-                start_point=start_point,
-                start_value=start_value,
-                final_point=state.best_point.copy(),
-                final_value=float( state.best_value ),
-                evaluations_spent=0,
-                iterations=0,
-                exit_reason="no_budget",
-                kind=kind,
-            )
-
-        lower = bounds[ :, 0 ]
-        current_u = np.clip( ( start_point - lower ) / widths, 0.0, 1.0 )
-        current_value = start_value
-        current_loss = self._final_polish_loss( current_value )
-        inverse_hessian = np.eye( 2, dtype=float )
-        spent = 0
-        iterations = 0
-        exit_reason = "max_iterations"
-        finite_difference_step = float( self.agsls_config.polish_finite_difference_step )
-        gradient_tolerance = float( self.agsls_config.polish_gradient_tolerance )
-        refinement_shrink = float( self.agsls_config.polish_iterative_refinement_shrink )
-        refinement_remaining = int( self.agsls_config.polish_iterative_refinement_passes )
-        minimum_direction_norm = 1e-12
-        max_iterations = max( 1, max_evaluations // 5 )
-
-        def to_world( normalized: np.ndarray ) -> np.ndarray:
-            return lower + np.clip( np.asarray( normalized, dtype=float ), 0.0, 1.0 ) * widths
-
-        def evaluate_points( normalized_points: np.ndarray ) -> np.ndarray | None:
-            nonlocal spent
-            resolved = np.reshape( np.asarray( normalized_points, dtype=float ), ( -1, 2 ) )
-            if resolved.size == 0:
-                return np.asarray( [ ], dtype=float )
-            count = int( resolved.shape[ 0 ] )
-            if spent + count > max_evaluations:
-                return None
-            if self._bounded_evaluation_batch( count ) < count:
-                return None
-            values = self._evaluate_arbitrary_points( np.asarray( [ to_world( point ) for point in resolved ], dtype=float ) )
-            spent += int( values.size )
-            return values
-
-        def gradient_at( normalized: np.ndarray ) -> tuple[ np.ndarray | None, str | None ]:
-            points: list[ np.ndarray ] = [ ]
-            pairs: list[ tuple[ int, int, float ] ] = [ ]
-            for axis in range( 2 ):
-                upper = np.asarray( normalized, dtype=float ).copy()
-                lower_point = np.asarray( normalized, dtype=float ).copy()
-                upper[ axis ] = min( 1.0, float( upper[ axis ] ) + finite_difference_step )
-                lower_point[ axis ] = max( 0.0, float( lower_point[ axis ] ) - finite_difference_step )
-                denominator = float( upper[ axis ] - lower_point[ axis ] )
-                if denominator <= 0.0:
-                    continue
-                upper_index = len( points )
-                points.append( upper )
-                points.append( lower_point )
-                pairs.append( ( axis, upper_index, denominator ) )
-            if not points:
-                return None, "invalid_seed"
-            values = evaluate_points( np.asarray( points, dtype=float ) )
-            if values is None:
-                return None, "budget_limit"
-            losses = np.asarray( [ self._final_polish_loss( float( value ) ) for value in values ], dtype=float )
-            gradient = np.zeros( 2, dtype=float )
-            for axis, upper_index, denominator in pairs:
-                lower_index = upper_index + 1
-                gradient[ axis ] = ( losses[ upper_index ] - losses[ lower_index ] ) / denominator
-            if not np.all( np.isfinite( gradient ) ):
-                return None, "invalid_gradient"
-            return gradient, None
-
-        gradient, failure = gradient_at( current_u )
-        if gradient is None:
-            return self._final_polish_summary(
-                enabled=True,
-                ran=spent > 0,
-                start_point=start_point,
-                start_value=start_value,
-                final_point=state.best_point.copy(),
-                final_value=float( state.best_value ),
-                evaluations_spent=spent,
-                iterations=iterations,
-                exit_reason=failure or "invalid_gradient",
-                kind=kind,
-            )
-        while True:
-            inner_exit = "max_iterations"
-            while iterations < max_iterations:
-                if np.linalg.norm( gradient ) <= gradient_tolerance:
-                    inner_exit = "gradient_converged"
-                    break
-                direction = -inverse_hessian.dot( gradient )
-                if not np.all( np.isfinite( direction ) ) or float( np.dot( gradient, direction ) ) >= 0.0:
-                    inverse_hessian = np.eye( 2, dtype=float )
-                    direction = -gradient
-                max_component = float( np.max( np.abs( direction ) ) )
-                if max_component <= minimum_direction_norm:
-                    inner_exit = "gradient_converged"
-                    break
-                if max_component > 0.25:
-                    direction = direction * ( 0.25 / max_component )
-                descent = float( np.dot( gradient, direction ) )
-                accepted_u: np.ndarray | None = None
-                accepted_value: float | None = None
-                accepted_loss: float | None = None
-                alpha = 1.0
-                budget_limited = False
-                while alpha >= 1e-12:
-                    trial_u = np.clip( current_u + alpha * direction, 0.0, 1.0 )
-                    if np.allclose( trial_u, current_u, atol=1e-15, rtol=0.0 ):
-                        alpha *= 0.5
-                        continue
-                    values = evaluate_points( trial_u.reshape( 1, 2 ) )
-                    if values is None:
-                        budget_limited = True
-                        break
-                    trial_value = float( values[ 0 ] )
-                    trial_loss = self._final_polish_loss( trial_value )
-                    if trial_loss <= current_loss + 1e-4 * alpha * descent or trial_loss < current_loss:
-                        accepted_u = trial_u
-                        accepted_value = trial_value
-                        accepted_loss = trial_loss
-                        break
-                    alpha *= 0.5
-                if accepted_u is None or accepted_value is None or accepted_loss is None:
-                    inner_exit = "budget_limit" if budget_limited else "line_search_failed"
-                    break
-                next_gradient, failure = gradient_at( accepted_u )
-                iterations += 1
-                step = accepted_u - current_u
-                if next_gradient is None:
-                    current_u = accepted_u
-                    current_value = accepted_value
-                    current_loss = accepted_loss
-                    inner_exit = failure or "budget_limit"
-                    break
-                y = next_gradient - gradient
-                curvature = float( np.dot( y, step ) )
-                if curvature > 1e-14 and np.isfinite( curvature ):
-                    rho = 1.0 / curvature
-                    identity = np.eye( 2, dtype=float )
-                    inverse_hessian = (
-                        ( identity - rho * np.outer( step, y ) )
-                        @ inverse_hessian
-                        @ ( identity - rho * np.outer( y, step ) )
-                        + rho * np.outer( step, step )
-                    )
-                else:
-                    inverse_hessian = np.eye( 2, dtype=float )
-                current_u = accepted_u
-                current_value = accepted_value
-                current_loss = accepted_loss
-                gradient = next_gradient
-            exit_reason = inner_exit
-            if inner_exit != "gradient_converged":
-                break
-            if refinement_remaining <= 0:
-                break
-            if max_evaluations - spent < 8:
-                break
-            refinement_remaining -= 1
-            finite_difference_step *= refinement_shrink
-            gradient_tolerance *= refinement_shrink
-            max_iterations += max( 1, max_iterations // 2 )
-            inverse_hessian = np.eye( 2, dtype=float )
-            refined_gradient, refined_failure = gradient_at( current_u )
-            if refined_gradient is None:
-                exit_reason = refined_failure or "refinement_gradient_failed"
-                break
-            gradient = refined_gradient
-
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        return self._final_polish_summary(
-            enabled=True,
-            ran=spent > 0,
-            start_point=start_point,
-            start_value=start_value,
-            final_point=state.best_point.copy(),
-            final_value=float( state.best_value ),
-            evaluations_spent=spent,
-            iterations=iterations,
-            exit_reason=exit_reason,
-            kind=kind,
+    @staticmethod
+    def _strict_progress(old_bounds: np.ndarray, new_bounds: np.ndarray) -> bool:
+        old_area = AdaptiveGridSmoothLifeSearch._bounds_area_for_progress(old_bounds)
+        new_area = AdaptiveGridSmoothLifeSearch._bounds_area_for_progress(new_bounds)
+        return (
+            np.all(np.isfinite(new_bounds))
+            and np.all(new_bounds[:, 1] > new_bounds[:, 0])
+            and np.isfinite(old_area)
+            and np.isfinite(new_area)
+            and new_area < old_area
+            and not np.allclose(old_bounds, new_bounds, rtol=0.0, atol=0.0)
         )
 
-    def _mark_latest_snapshot(
-        self,
-        *,
-        box_id: int | None = None,
-        decision: str,
-        basins: list[ Basin ] | None = None,
-        microgrid_summary: dict[ str, object ] | None = None,
-        translation_summary: dict[ str, object ] | None = None,
-        pattern_search_summary: dict[ str, object ] | None = None,
-    ) -> None:
-        if not self.engine.snapshots:
-            return
-        snapshot = self.engine.snapshots[ -1 ]
-        snapshot.metadata[ "zoom_decision" ] = decision
-        if basins is not None:
-            snapshot.metadata[ "dense_groups" ] = self._basin_metadata( basins )
-        snapshot.metadata.update(
-            self._late_stage_summary_payload(
-                box_id=box_id,
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-        )
-
-    def _record_decision_reason( self, reason: str, *, accepted: bool = False ) -> None:
-        self._decision_reason_counts[ reason ] = int( self._decision_reason_counts.get( reason, 0 ) ) + 1
-        if accepted:
-            self._accepted_zoom_count += 1
-
-    def _probe_score_field( self ) -> np.ndarray:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        support = self._decision_support_field()
-        uncertainty = 1.0 - np.abs( state.objective_field - 0.5 ) * 2.0
-        return self.engine.exploration_score_field() + 0.35 * support + 0.15 * np.clip( uncertainty, 0.0, 1.0 )
-
-    def _probe_basins( self, basins: list[ Basin ] ) -> None:
-        if self.agsls_config.candidate_probe_evaluations <= 0:
-            return
-        for basin in basins:
-            if self._max_evaluations_reached():
-                break
-            batch_size = self._bounded_evaluation_batch( self.agsls_config.candidate_probe_evaluations )
-            if batch_size <= 0:
-                break
-            self.engine.explore_top_pixels(
-                batch_size,
-                mask=basin.mask,
-                score_field=self._probe_score_field(),
-            )
-
-    def _eligible_basins( self, basins: list[ Basin ] ) -> list[ Basin ]:
-        return eligible_basins( basins, self.agsls_config )
-
-    def _should_choose_leader( self, basins: list[ Basin ], explored_in_stage: int ) -> tuple[ bool, str ]:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        return should_choose_leader( basins, explored_in_stage, self.agsls_config, state )
-
-    def _select_basin( self, basins: list[ Basin ] ) -> Basin:
-        return select_basin( basins, self.agsls_config )
-
-    def _expand_bounds_to_min_widths(
+    def _expand_bounds_to_retain_incumbent(
         self,
         bounds: np.ndarray,
+        current_bounds: np.ndarray,
+        cell_widths: np.ndarray,
+    ) -> tuple[np.ndarray, bool]:
+        state = self._require_state()
+        best_point = np.asarray(state.best_point, dtype=float)
+        if best_point.shape != (2,) or not np.all(np.isfinite(best_point)):
+            return bounds, False
+        if not point_in_bounds(best_point, current_bounds):
+            return bounds, False
+        retained = point_in_bounds(best_point, bounds)
+        expanded = np.asarray(bounds, dtype=float).copy()
+        current_widths = np.asarray(current_bounds, dtype=float)[:, 1] - np.asarray(current_bounds, dtype=float)[:, 0]
+        padding = np.maximum(
+            np.asarray(cell_widths, dtype=float),
+            float(self.agsls_config.commit_incumbent_padding_fraction) * current_widths,
+        )
+        for axis in range(2):
+            lower_limit = float(current_bounds[axis, 0])
+            upper_limit = float(current_bounds[axis, 1])
+            if best_point[axis] < expanded[axis, 0] + padding[axis]:
+                expanded[axis, 0] = max(lower_limit, float(best_point[axis] - padding[axis]))
+            if best_point[axis] > expanded[axis, 1] - padding[axis]:
+                expanded[axis, 1] = min(upper_limit, float(best_point[axis] + padding[axis]))
+        return expanded, retained or point_in_bounds(best_point, expanded)
+
+    def _fit_surrogate_for_basin(
+        self,
+        basin: Basin,
+        current_bounds: np.ndarray,
+        *,
+        min_samples: int,
+        max_samples: int,
+    ) -> CommitSurrogateResult:
+        state = self._require_state()
+        return fit_commit_surrogate(
+            objective_values=state.objective_values,
+            evaluated_mask=state.evaluated_mask,
+            support_field=self._support_field(),
+            basin=basin,
+            bounds=current_bounds,
+            grid_shape=self.engine.config.grid_shape,
+            maximize=self.engine.config.maximize,
+            min_samples=int(min_samples),
+            max_samples=int(max_samples),
+            regularization=self.agsls_config.commit_surrogate_regularization,
+            min_predicted_improvement=self.agsls_config.commit_surrogate_min_predicted_improvement,
+            max_condition=self.agsls_config.commit_surrogate_max_condition,
+            support_weight=self.agsls_config.commit_surrogate_support_weight,
+        )
+
+    def _commit_surrogate(self, basin: Basin, current_bounds: np.ndarray) -> CommitSurrogateResult:
+        if not self.agsls_config.commit_surrogate_enabled:
+            return CommitSurrogateResult(accepted=False, reason="disabled", sample_count=0)
+        return self._fit_surrogate_for_basin(
+            basin,
+            current_bounds,
+            min_samples=self.agsls_config.commit_surrogate_min_samples,
+            max_samples=self.agsls_config.commit_surrogate_max_samples,
+        )
+
+    def _is_better_value(self, candidate_value: float | None, incumbent_value: float | None) -> bool:
+        if candidate_value is None or incumbent_value is None:
+            return False
+        if not np.isfinite(candidate_value) or not np.isfinite(incumbent_value):
+            return False
+        if self.engine.config.maximize:
+            return float(candidate_value) > float(incumbent_value)
+        return float(candidate_value) < float(incumbent_value)
+
+    def _evaluate_direct_sample(self, point: np.ndarray) -> tuple[float, bool]:
+        """Evaluate an off-grid sample and update best records without touching grid cache."""
+
+        if self._remaining_evaluations() <= 0:
+            return float("nan"), False
+        state = self._require_state()
+        resolved = np.asarray(point, dtype=float)
+        if resolved.shape != (2,) or not np.all(np.isfinite(resolved)):
+            return float("nan"), False
+        value = float(self.objective(resolved))
+        state.evaluations += 1
+        self.sample_archive.add_point(resolved, value)
+        improved_global = not np.isfinite(state.best_value) or self.engine._is_better(value, float(state.best_value))
+        if improved_global:
+            state.best_point = resolved.copy()
+            state.best_value = float(value)
+        if not np.isfinite(state.local_best_value) or self.engine._is_better(value, float(state.local_best_value)):
+            state.local_best_point = resolved.copy()
+            state.local_best_value = float(value)
+        if not np.isfinite(state.box_best_value) or self.engine._is_better(value, float(state.box_best_value)):
+            state.box_best_point = resolved.copy()
+            state.box_best_value = float(value)
+        return float(value), bool(improved_global)
+
+    def _incumbent_surrogate_basin(self, current_bounds: np.ndarray, *, min_samples: int | None = None) -> Basin | None:
+        state = self._require_state()
+        best_point = np.asarray(state.best_point, dtype=float)
+        if best_point.shape != (2,) or not np.all(np.isfinite(best_point)):
+            return None
+        if not point_in_bounds(best_point, current_bounds):
+            return None
+        height, width = self.engine.config.grid_shape
+        current_widths = current_bounds[:, 1] - current_bounds[:, 0]
+        if np.any(current_widths <= 0.0):
+            return None
+        col = int(np.clip(np.floor(((best_point[0] - current_bounds[0, 0]) / current_widths[0]) * width), 0, width - 1))
+        row = int(np.clip(np.floor(((best_point[1] - current_bounds[1, 0]) / current_widths[1]) * height), 0, height - 1))
+        sample_floor = self.agsls_config.commit_surrogate_min_samples if min_samples is None else int(min_samples)
+        radius = max(4, int(np.ceil(np.sqrt(float(sample_floor)))))
+        row_min = max(0, row - radius)
+        row_max = min(height - 1, row + radius)
+        col_min = max(0, col - radius)
+        col_max = min(width - 1, col + radius)
+        mask = np.zeros(self.engine.config.grid_shape, dtype=bool)
+        mask[row_min : row_max + 1, col_min : col_max + 1] = True
+        bbox_world = np.asarray(
+            [
+                [
+                    current_bounds[0, 0] + (col_min / width) * current_widths[0],
+                    current_bounds[0, 0] + ((col_max + 1) / width) * current_widths[0],
+                ],
+                [
+                    current_bounds[1, 0] + (row_min / height) * current_widths[1],
+                    current_bounds[1, 0] + ((row_max + 1) / height) * current_widths[1],
+                ],
+            ],
+            dtype=float,
+        )
+        support = self._support_field()
+        objective_field = np.asarray(state.objective_field, dtype=float)
+        evaluated_count = int(np.count_nonzero(mask & state.evaluated_mask))
+        objective_score = float(np.max(objective_field[mask])) if np.any(mask) else 0.0
+        return Basin(
+            mask=mask,
+            centroid_grid=np.asarray([row, col], dtype=float),
+            centroid_world=best_point.copy(),
+            bbox_grid=(row_min, col_min, row_max, col_max),
+            bbox_world=bbox_world,
+            support_mass=float(np.sum(support[mask])) if support.shape == mask.shape else 0.0,
+            objective_score=objective_score,
+            stability_score=0.0,
+            alive_density=1.0,
+            basin_best_point=best_point.copy(),
+            basin_best_value=float(state.best_value),
+            evaluated_count=evaluated_count,
+            best_objective_score=objective_score,
+            mean_objective_score=objective_score,
+            incumbent_in_envelope=True,
+        )
+
+    def _should_try_incumbent_surrogate(self, basin: Basin, current_bounds: np.ndarray) -> bool:
+        if not self.agsls_config.commit_surrogate_enabled:
+            return False
+        if basin.incumbent_in_envelope:
+            return False
+        state = self._require_state()
+        if not point_in_bounds(np.asarray(state.best_point, dtype=float), current_bounds):
+            return False
+        if basin.basin_best_value is None:
+            return np.isfinite(state.best_value)
+        return self._is_better_value(float(state.best_value), float(basin.basin_best_value))
+
+    def _empty_valley_tracking_diagnostics(self, reason: str) -> dict[str, object]:
+        state = self._require_state()
+        return {
+            "valley_tracking_used": False,
+            "valley_tracking_reason": reason,
+            "valley_tracking_probes": 0,
+            "valley_tracking_improvements": 0,
+            "valley_tracking_best_before": float(state.best_value),
+            "valley_tracking_best_after": float(state.best_value),
+        }
+
+    def _exploitation_valley_surrogate(
+        self,
+        basin: Basin | None,
+        current_bounds: np.ndarray,
+    ) -> tuple[CommitSurrogateResult, str]:
+        state = self._require_state()
+        best_point = np.asarray(state.best_point, dtype=float)
+        min_samples = int(self.agsls_config.exploitation_valley_surrogate_min_samples)
+        max_samples = int(self.agsls_config.exploitation_valley_surrogate_max_samples)
+        if point_in_bounds(best_point, current_bounds):
+            incumbent_basin = self._incumbent_surrogate_basin(current_bounds, min_samples=min_samples)
+            if incumbent_basin is not None:
+                incumbent = self._fit_surrogate_for_basin(
+                    incumbent_basin,
+                    current_bounds,
+                    min_samples=min_samples,
+                    max_samples=max_samples,
+                )
+                if incumbent.accepted:
+                    return incumbent, "incumbent"
+        if basin is not None:
+            fallback = self._fit_surrogate_for_basin(
+                basin,
+                current_bounds,
+                min_samples=min_samples,
+                max_samples=max_samples,
+            )
+            return fallback, "basin"
+        return CommitSurrogateResult(accepted=False, reason="no_basin", sample_count=0), "none"
+
+    def _evaluate_valley_probe(self, point: np.ndarray) -> tuple[float, bool]:
+        return self._evaluate_direct_sample(point)
+
+    def _track_exploitation_valley(self, basin: Basin | None, current_bounds: np.ndarray) -> dict[str, object]:
+        if not self.agsls_config.exploitation_valley_tracking_enabled:
+            return self._empty_valley_tracking_diagnostics("disabled")
+        probe_limit = min(
+            int(self.agsls_config.exploitation_valley_probe_evaluations),
+            max(self._remaining_evaluations() - int(self.engine.config.evaluations_per_step), 0),
+        )
+        if probe_limit <= 0:
+            return self._empty_valley_tracking_diagnostics("no_probe_budget")
+
+        state = self._require_state()
+        best_before = float(state.best_value)
+        surrogate, source = self._exploitation_valley_surrogate(basin, current_bounds)
+        tangent = surrogate_valley_tangent(surrogate)
+        if tangent is None:
+            details = self._empty_valley_tracking_diagnostics(f"surrogate_{surrogate.reason}")
+            details["valley_tracking_surrogate_source"] = source
+            details["valley_tracking_surrogate_samples"] = int(surrogate.sample_count)
+            return details
+
+        current_widths = np.asarray(current_bounds, dtype=float)[:, 1] - np.asarray(current_bounds, dtype=float)[:, 0]
+        if not np.all(np.isfinite(current_widths)) or np.any(current_widths <= 0.0):
+            return self._empty_valley_tracking_diagnostics("invalid_bounds")
+
+        probes = 0
+        improvements = 0
+        step_fraction = float(self.agsls_config.exploitation_valley_step_fraction)
+        min_step = float(self.agsls_config.exploitation_valley_min_step_fraction)
+        decay = float(self.agsls_config.exploitation_valley_step_decay)
+        reason = "no_improvement"
+        while probes < probe_limit and step_fraction >= min_step and not self._max_evaluations_reached():
+            base_point = np.asarray(state.best_point, dtype=float)
+            if not point_in_bounds(base_point, current_bounds):
+                reason = "best_outside_bounds"
+                break
+            candidates: list[tuple[float, np.ndarray, float, bool]] = []
+            for direction in (1.0, -1.0):
+                if probes >= probe_limit:
+                    break
+                candidate = base_point + direction * step_fraction * tangent * current_widths
+                if not np.all(np.isfinite(candidate)) or not point_in_bounds(candidate, current_bounds):
+                    continue
+                value, improved = self._evaluate_valley_probe(candidate)
+                probes += 1
+                candidates.append((value, candidate, direction, improved))
+            if not candidates:
+                reason = "no_valid_candidates"
+                break
+
+            best_value, best_candidate, _direction, improved_pair = candidates[0]
+            for value, candidate, direction, improved in candidates[1:]:
+                if self.engine._is_better(value, best_value):
+                    best_value, best_candidate, _direction, improved_pair = value, candidate, direction, improved
+            if improved_pair:
+                state.best_point = best_candidate.copy()
+                state.best_value = float(best_value)
+                if self.engine._is_better(best_value, float(state.local_best_value)):
+                    state.local_best_point = best_candidate.copy()
+                    state.local_best_value = float(best_value)
+                if self.engine._is_better(best_value, float(state.box_best_value)):
+                    state.box_best_point = best_candidate.copy()
+                    state.box_best_value = float(best_value)
+                improvements += 1
+                reason = "improved"
+            elif step_fraction <= min_step:
+                reason = "no_improvement_at_min_step"
+                break
+            step_fraction *= decay
+
+        if probes > 0:
+            self.engine._update_improvement_trackers()
+        if improvements > 0:
+            reason = "improved"
+        return {
+            "valley_tracking_used": probes > 0,
+            "valley_tracking_reason": reason,
+            "valley_tracking_probes": int(probes),
+            "valley_tracking_improvements": int(improvements),
+            "valley_tracking_best_before": best_before,
+            "valley_tracking_best_after": float(state.best_value),
+            "valley_tracking_tangent": np.asarray(tangent, dtype=float).tolist(),
+            "valley_tracking_surrogate_source": source,
+            "valley_tracking_surrogate_samples": int(surrogate.sample_count),
+        }
+
+    def _support_at_points(self, points: np.ndarray, bounds: np.ndarray) -> np.ndarray:
+        candidates = np.asarray(points, dtype=float)
+        if candidates.size == 0:
+            return np.empty((0,), dtype=float)
+        support = self._support_field()
+        height, width = self.engine.config.grid_shape
+        current_widths = np.asarray(bounds, dtype=float)[:, 1] - np.asarray(bounds, dtype=float)[:, 0]
+        if support.shape != (height, width) or np.any(current_widths <= 0.0):
+            return np.zeros(candidates.shape[0], dtype=float)
+        cols = np.floor(((candidates[:, 0] - bounds[0, 0]) / current_widths[0]) * width).astype(int)
+        rows = np.floor(((candidates[:, 1] - bounds[1, 0]) / current_widths[1]) * height).astype(int)
+        cols = np.clip(cols, 0, width - 1)
+        rows = np.clip(rows, 0, height - 1)
+        values = np.asarray(support[rows, cols], dtype=float)
+        return np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _trust_region_preferred_center(
+        self,
+        phase: PhaseName,
+        basin: Basin | None,
+        current_bounds: np.ndarray,
+    ) -> tuple[np.ndarray, dict[str, object], tuple[np.ndarray, ...]]:
+        state = self._require_state()
+        anchors: list[np.ndarray] = []
+        best_point = np.asarray(state.best_point, dtype=float)
+        details: dict[str, object] = {"trust_region_center_source": "box_center"}
+        if point_in_bounds(best_point, current_bounds):
+            anchors.append(best_point.copy())
+
+        if phase == "exploitation" and point_in_bounds(best_point, current_bounds):
+            details["trust_region_center_source"] = "global_best"
+            return best_point.copy(), details, tuple(anchors)
+
+        if basin is not None:
+            if basin.basin_best_point is not None and point_in_bounds(basin.basin_best_point, current_bounds):
+                anchors.append(np.asarray(basin.basin_best_point, dtype=float).copy())
+            if point_in_bounds(basin.centroid_world, current_bounds):
+                anchors.append(np.asarray(basin.centroid_world, dtype=float).copy())
+            if phase == "commit" and self.agsls_config.commit_surrogate_enabled:
+                surrogate = self._commit_surrogate(basin, current_bounds)
+                details.update(
+                    {
+                        "trust_region_commit_surrogate_used": bool(surrogate.accepted),
+                        "trust_region_commit_surrogate_reason": surrogate.reason,
+                        "trust_region_commit_surrogate_samples": int(surrogate.sample_count),
+                    }
+                )
+                if surrogate.accepted and surrogate.point is not None and point_in_bounds(surrogate.point, current_bounds):
+                    anchors.append(np.asarray(surrogate.point, dtype=float).copy())
+                    details["trust_region_center_source"] = "commit_surrogate"
+                    return np.asarray(surrogate.point, dtype=float).copy(), details, tuple(anchors)
+            if basin.basin_best_point is not None and point_in_bounds(basin.basin_best_point, current_bounds):
+                details["trust_region_center_source"] = "basin_best"
+                return np.asarray(basin.basin_best_point, dtype=float).copy(), details, tuple(anchors)
+            if point_in_bounds(basin.centroid_world, current_bounds):
+                details["trust_region_center_source"] = "basin_centroid"
+                return np.asarray(basin.centroid_world, dtype=float).copy(), details, tuple(anchors)
+
+        if point_in_bounds(best_point, current_bounds):
+            details["trust_region_center_source"] = "global_best"
+            return best_point.copy(), details, tuple(anchors)
+        return np.mean(current_bounds, axis=1), details, tuple(anchors)
+
+    def _initial_trust_radius_fraction(self, basin: Basin | None, current_bounds: np.ndarray) -> float:
+        initial = float(self.agsls_config.trust_region_initial_radius_fraction)
+        if basin is None:
+            return initial
+        current_widths = np.asarray(current_bounds, dtype=float)[:, 1] - np.asarray(current_bounds, dtype=float)[:, 0]
+        bbox = np.asarray(basin.bbox_world, dtype=float)
+        bbox_widths = bbox[:, 1] - bbox[:, 0]
+        if np.any(current_widths <= 0.0) or np.any(bbox_widths <= 0.0):
+            return initial
+        basin_fraction = float(np.max(0.5 * bbox_widths / current_widths))
+        radius = min(initial, max(float(self.agsls_config.trust_region_min_radius_fraction), 1.25 * basin_fraction))
+        return float(np.clip(radius, self.agsls_config.trust_region_min_radius_fraction, initial))
+
+    def _trust_region_state(self, phase: PhaseName) -> TrustRegionState:
+        if phase not in self._trust_region_states:
+            self._trust_region_states[phase] = TrustRegionState()
+        return self._trust_region_states[phase]
+
+    def _trust_region_surrogate(
+        self,
+        phase: PhaseName,
         center: np.ndarray,
-        min_widths: np.ndarray,
+        current_bounds: np.ndarray,
+        radius_fraction: float,
+    ) -> tuple[ArchiveQuadraticSurrogate, np.ndarray | None]:
+        region = trust_region_bounds(center, radius_fraction, current_bounds)
+        if region is None:
+            return ArchiveQuadraticSurrogate(accepted=False, reason="invalid_region", sample_count=0), None
+        points, values = self.sample_archive.arrays()
+        min_samples = (
+            self.agsls_config.commit_surrogate_min_samples
+            if phase == "commit"
+            else self.agsls_config.exploitation_valley_surrogate_min_samples
+        )
+        max_samples = (
+            self.agsls_config.commit_surrogate_max_samples
+            if phase == "commit"
+            else self.agsls_config.exploitation_valley_surrogate_max_samples
+        )
+        surrogate = fit_archive_quadratic(
+            archive_points=points,
+            archive_values=values,
+            region_bounds=region,
+            center=center,
+            maximize=self.engine.config.maximize,
+            min_samples=min_samples,
+            max_samples=max_samples,
+            regularization=self.agsls_config.commit_surrogate_regularization,
+            max_condition=self.agsls_config.commit_surrogate_max_condition,
+        )
+        return surrogate, region
+
+    def _rank_trust_region_candidates(
+        self,
+        *,
+        phase: PhaseName,
+        candidates: np.ndarray,
+        surrogate: ArchiveQuadraticSurrogate,
         current_bounds: np.ndarray,
     ) -> np.ndarray:
-        return expand_bounds_to_min_widths( bounds, center, min_widths, current_bounds )
+        if candidates.size == 0:
+            return np.empty((0,), dtype=int)
+        points, _values = self.sample_archive.arrays()
+        uncertainty = nearest_archive_distance(candidates, points, current_bounds)
+        duplicate_mask = uncertainty <= 1e-12
+        support = self._support_at_points(candidates, current_bounds)
+        support_span = max(float(np.max(support) - np.min(support)), 1e-12) if support.size else 1.0
+        support_score = (support - float(np.min(support))) / support_span if support.size else np.zeros(candidates.shape[0])
 
-    def _padded_bounds( self, basin: Basin ) -> np.ndarray:
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        current_bounds = state.bounds
-        new_bounds = basin.bbox_world.copy()
-        center = basin.basin_best_point if basin.basin_best_point is not None else basin.centroid_world
-        incumbent_point = None
-        if not basin.incumbent_in_envelope and np.all( np.isfinite( state.best_point ) ):
-            incumbent_point = np.asarray( state.best_point, dtype=float )
-        anchor_point = basin.basin_best_point if basin.basin_best_point is not None else center
-        return self._finalize_zoom_bounds(
-            new_bounds,
-            np.asarray( center, dtype=float ),
-            current_bounds,
-            anchor_point=np.asarray( anchor_point, dtype=float ),
-            incumbent_point=incumbent_point,
+        predictions = surrogate.predict(candidates, maximize=self.engine.config.maximize)
+        if predictions is None or not np.any(np.isfinite(predictions)):
+            predicted_score = np.zeros(candidates.shape[0], dtype=float)
+            improvement_bonus = np.zeros(candidates.shape[0], dtype=float)
+        else:
+            finite_predictions = np.where(np.isfinite(predictions), predictions, np.nan)
+            finite_values = finite_predictions[np.isfinite(finite_predictions)]
+            span = max(float(np.max(finite_values) - np.min(finite_values)), 1e-12)
+            if self.engine.config.maximize:
+                predicted_score = (np.nan_to_num(finite_predictions, nan=float(np.min(finite_values))) - float(np.min(finite_values))) / span
+                improvement_bonus = (finite_predictions > float(self._require_state().best_value)).astype(float)
+            else:
+                predicted_score = (float(np.max(finite_values)) - np.nan_to_num(finite_predictions, nan=float(np.max(finite_values)))) / span
+                improvement_bonus = (finite_predictions < float(self._require_state().best_value)).astype(float)
+
+        uncertainty_weight = (
+            self.agsls_config.commit_acquisition_uncertainty_weight
+            if phase == "commit"
+            else self.agsls_config.exploitation_acquisition_uncertainty_weight
         )
+        score = (
+            predicted_score
+            + 0.35 * improvement_bonus
+            + float(self.agsls_config.trust_region_support_weight) * support_score
+            + float(uncertainty_weight) * uncertainty
+        )
+        score = np.asarray(score, dtype=float)
+        score[duplicate_mask] = -np.inf
+        score = np.where(np.isfinite(score), score, -np.inf)
+        return np.argsort(score)[::-1]
+
+    def _run_trust_region_batch(
+        self,
+        phase: PhaseName,
+        basin: Basin | None,
+        current_bounds: np.ndarray,
+    ) -> dict[str, object]:
+        if phase == "exploration":
+            return {"trust_region_used": False, "trust_region_reason": "exploration"}
+        if not self.agsls_config.trust_region_enabled:
+            return {"trust_region_used": False, "trust_region_reason": "disabled"}
+        eval_limit = (
+            self.agsls_config.commit_trust_region_evaluations
+            if phase == "commit"
+            else self.agsls_config.exploitation_trust_region_evaluations
+        )
+        eval_limit = min(int(eval_limit), self._remaining_evaluations())
+        if eval_limit <= 0:
+            return {"trust_region_used": False, "trust_region_reason": "no_budget"}
+
+        self._archive_current_grid_samples()
+        state = self._require_state()
+        best_before = float(state.best_value)
+        center, center_details, anchors = self._trust_region_preferred_center(phase, basin, current_bounds)
+        trust_state = self._trust_region_state(phase)
+        radius_before = (
+            self._initial_trust_radius_fraction(basin, current_bounds)
+            if trust_state.radius_fraction is None
+            else float(trust_state.radius_fraction)
+        )
+        radius_before = float(
+            np.clip(
+                radius_before,
+                self.agsls_config.trust_region_min_radius_fraction,
+                1.0,
+            )
+        )
+        trust_state.center = np.asarray(center, dtype=float).copy()
+        trust_state.radius_fraction = radius_before
+
+        surrogate, region = self._trust_region_surrogate(phase, center, current_bounds, radius_before)
+        candidates = deterministic_candidate_pool(
+            center=center,
+            active_bounds=current_bounds,
+            radius_fraction=radius_before,
+            pool_size=self.agsls_config.trust_region_candidate_pool_size,
+            surrogate=surrogate,
+            anchors=anchors,
+        )
+        ranked = self._rank_trust_region_candidates(
+            phase=phase,
+            candidates=candidates,
+            surrogate=surrogate,
+            current_bounds=current_bounds,
+        )
+        if phase == "exploitation" and candidates.shape[0] > 0:
+            priority = np.arange(min(candidates.shape[0], max(32, eval_limit)), dtype=int)
+            priority_set = {int(index) for index in priority.tolist()}
+            ordered_indices = [int(index) for index in priority.tolist()] + [
+                int(index) for index in ranked if int(index) not in priority_set
+            ]
+        else:
+            ordered_indices = [int(index) for index in ranked]
+
+        evaluations_spent = 0
+        improvements = 0
+        accepted_candidates = 0
+        best_candidate_value = float(state.best_value)
+        best_candidate_point = np.asarray(state.best_point, dtype=float).copy()
+        for candidate_index in ordered_indices:
+            if evaluations_spent >= eval_limit or self._remaining_evaluations() <= 0:
+                break
+            candidate = np.asarray(candidates[int(candidate_index)], dtype=float)
+            if not point_in_bounds(candidate, current_bounds):
+                continue
+            archive_points, _archive_values = self.sample_archive.arrays()
+            if archive_points.size > 0:
+                duplicate_distance = nearest_archive_distance(candidate.reshape(1, 2), archive_points, current_bounds)
+                if duplicate_distance.size and float(duplicate_distance[0]) <= 1e-12:
+                    continue
+            value, improved = self._evaluate_direct_sample(candidate)
+            if not np.isfinite(value):
+                continue
+            evaluations_spent += 1
+            accepted_candidates += 1
+            if self.engine._is_better(value, best_candidate_value):
+                best_candidate_value = float(value)
+                best_candidate_point = candidate.copy()
+            if improved:
+                improvements += 1
+
+        if evaluations_spent > 0:
+            self.engine._update_improvement_trackers()
+
+        success = bool(improvements > 0)
+        if success:
+            center_after = np.asarray(state.best_point, dtype=float).copy()
+            radius_after = min(
+                1.0,
+                radius_before * float(self.agsls_config.trust_region_expand_factor),
+            )
+            reason = "improved"
+        else:
+            center_after = np.asarray(center, dtype=float).copy()
+            radius_after = max(
+                float(self.agsls_config.trust_region_min_radius_fraction),
+                radius_before * float(self.agsls_config.trust_region_shrink_factor),
+            )
+            reason = "no_improvement" if accepted_candidates > 0 else "no_candidates"
+
+        trust_state.center = center_after.copy()
+        trust_state.radius_fraction = float(radius_after)
+        event: dict[str, object] = {
+            "phase": phase,
+            "trust_region_used": evaluations_spent > 0,
+            "trust_region_reason": reason,
+            "trust_region_success": success,
+            "trust_region_candidates": int(candidates.shape[0]),
+            "trust_region_evaluations": int(evaluations_spent),
+            "trust_region_improvements": int(improvements),
+            "trust_region_center_before": np.asarray(center, dtype=float).tolist(),
+            "trust_region_center_after": center_after.tolist(),
+            "trust_region_radius_before": float(radius_before),
+            "trust_region_radius_after": float(radius_after),
+            "trust_region_best_before": best_before,
+            "trust_region_best_after": float(state.best_value),
+            "trust_region_remap": False,
+            "trust_region_region_bounds": None if region is None else np.asarray(region, dtype=float).tolist(),
+            **center_details,
+            **surrogate.diagnostics(),
+        }
+        if best_candidate_point is not None and np.all(np.isfinite(best_candidate_point)):
+            event["trust_region_best_candidate"] = best_candidate_point.tolist()
+            event["trust_region_best_candidate_value"] = float(best_candidate_value)
+        self._trust_region_events.append(event)
+        return event
+
+    def _commit_bounds(
+        self,
+        basin: Basin,
+        current_bounds: np.ndarray,
+        trust_region_details: dict[str, object] | None = None,
+    ) -> tuple[np.ndarray | None, dict[str, object]]:
+        current_widths = current_bounds[:, 1] - current_bounds[:, 0]
+        height, width = self.engine.config.grid_shape
+        cell_widths = np.asarray([current_widths[0] / width, current_widths[1] / height], dtype=float)
+        min_widths = np.maximum(self.agsls_config.commit_min_shrink_fraction * current_widths, cell_widths)
+        bbox_widths = basin.bbox_world[:, 1] - basin.bbox_world[:, 0]
+        padded_widths = bbox_widths * (1.0 + 2.0 * self.agsls_config.commit_zoom_padding)
+        surrogate = self._commit_surrogate(basin, current_bounds)
+        surrogate_source = "basin"
+        if self._should_try_incumbent_surrogate(basin, current_bounds):
+            incumbent_basin = self._incumbent_surrogate_basin(current_bounds)
+            if incumbent_basin is not None:
+                incumbent_surrogate = self._commit_surrogate(incumbent_basin, current_bounds)
+                if incumbent_surrogate.accepted:
+                    surrogate = incumbent_surrogate
+                    surrogate_source = "incumbent"
+        center = basin.centroid_world if basin.basin_best_point is None else basin.basin_best_point
+        if surrogate.accepted and surrogate.point is not None:
+            center = surrogate.point
+            surrogate_widths = surrogate_axis_widths(
+                surrogate=surrogate,
+                bbox_widths=padded_widths,
+                current_widths=current_widths,
+                valley_expand=self.agsls_config.commit_surrogate_valley_expand,
+                cross_shrink=self.agsls_config.commit_surrogate_cross_shrink,
+            )
+            if surrogate_widths is not None:
+                padded_widths = np.minimum(padded_widths, surrogate_widths)
+        trust_center = None
+        trust_radius = None
+        if (
+            trust_region_details is not None
+            and bool(trust_region_details.get("trust_region_used"))
+            and bool(trust_region_details.get("trust_region_success"))
+            and bool(trust_region_details.get("trust_region_zoom_override"))
+        ):
+            raw_center = trust_region_details.get("trust_region_center_after")
+            raw_radius = trust_region_details.get("trust_region_radius_after")
+            try:
+                candidate_center = np.asarray(raw_center, dtype=float)
+                candidate_radius = float(raw_radius)
+            except (TypeError, ValueError):
+                candidate_center = np.empty((0,), dtype=float)
+                candidate_radius = float("nan")
+            if (
+                candidate_center.shape == (2,)
+                and np.all(np.isfinite(candidate_center))
+                and np.isfinite(candidate_radius)
+                and candidate_radius > 0.0
+                and point_in_bounds(candidate_center, current_bounds)
+            ):
+                trust_center = candidate_center
+                trust_radius = candidate_radius
+                center = candidate_center
+                trust_widths = 2.0 * candidate_radius * current_widths
+                padded_widths = np.minimum(padded_widths, trust_widths)
+        target_widths = np.minimum(current_widths, np.maximum(padded_widths, min_widths))
+        new_bounds = self._centered_bounds(np.asarray(center, dtype=float), target_widths, current_bounds)
+        new_bounds, retained_incumbent = self._expand_bounds_to_retain_incumbent(new_bounds, current_bounds, cell_widths)
+        surrogate_diagnostics = {
+            **surrogate.diagnostics(),
+            "surrogate_source": surrogate_source,
+            "trust_region_zoom_center_used": trust_center is not None,
+            "trust_region_zoom_radius": None if trust_radius is None else float(trust_radius),
+        }
+        if not self._strict_progress(current_bounds, new_bounds):
+            details = {
+                "zoom_reason": "no_commit_shrink",
+                **surrogate_diagnostics,
+            }
+            return None, details
+        return new_bounds, {
+            "zoom_reason": "commit_basin",
+            "zoom_center": np.asarray(center, dtype=float).tolist(),
+            "min_widths": min_widths.tolist(),
+            "retained_global_best": bool(retained_incumbent),
+            **surrogate_diagnostics,
+        }
+
+    def _exploitation_center(self, basin: Basin | None, current_bounds: np.ndarray) -> tuple[np.ndarray, bool, str]:
+        state = self._require_state()
+        best_point = np.asarray(state.best_point, dtype=float)
+        if point_in_bounds(best_point, current_bounds):
+            return best_point.copy(), True, "global_best"
+        if basin is not None and basin.basin_best_point is not None and point_in_bounds(basin.basin_best_point, current_bounds):
+            return np.asarray(basin.basin_best_point, dtype=float).copy(), False, "basin_best"
+        if basin is not None and point_in_bounds(basin.centroid_world, current_bounds):
+            return np.asarray(basin.centroid_world, dtype=float).copy(), False, "basin_centroid"
+        return np.mean(current_bounds, axis=1), False, "box_center"
+
+    def _exploitation_bounds(self, basin: Basin | None, current_bounds: np.ndarray) -> tuple[np.ndarray | None, dict[str, object]]:
+        current_widths = current_bounds[:, 1] - current_bounds[:, 0]
+        target_widths = current_widths * float(self.agsls_config.exploitation_shrink_fraction)
+        center, anchored, center_kind = self._exploitation_center(basin, current_bounds)
+        new_bounds = self._centered_bounds(center, target_widths, current_bounds)
+        if not self._strict_progress(current_bounds, new_bounds):
+            return None, {"zoom_reason": "no_exploitation_shrink", "zoom_center_kind": center_kind}
+        used_representable_floor = bool(np.any((new_bounds[:, 1] - new_bounds[:, 0]) > np.maximum(target_widths, 0.0) * (1.0 + 1e-12)))
+        return new_bounds, {
+            "zoom_reason": "exploitation_global_best" if anchored else "exploitation_context",
+            "zoom_center": center.tolist(),
+            "zoom_center_kind": center_kind,
+            "anchored_on_global_best": anchored,
+            "representable_floor": used_representable_floor,
+        }
+
+    def _zoom_bounds_for_phase(
+        self,
+        phase: PhaseName,
+        basin: Basin | None,
+        trust_region_details: dict[str, object] | None = None,
+    ) -> tuple[np.ndarray | None, dict[str, object]]:
+        current_bounds = self._require_state().bounds.copy()
+        if phase == "commit":
+            if basin is None:
+                return None, {"zoom_reason": "no_commit_basin"}
+            return self._commit_bounds(basin, current_bounds, trust_region_details=trust_region_details)
+        if phase == "exploitation":
+            return self._exploitation_bounds(basin, current_bounds)
+        return None, {"zoom_reason": "exploration_no_zoom"}
+
+    @staticmethod
+    def _basin_diagnostics(basin: Basin | None) -> dict[str, object]:
+        if basin is None:
+            return {}
+        return {
+            "score": float(basin.combined_score),
+            "bbox": basin.bbox_world.tolist(),
+            "area": int(basin.area),
+            "support_mass": float(basin.support_mass),
+            "alive_density": float(basin.alive_density),
+            "stability_score": float(basin.stability_score),
+            "objective_score": float(basin.objective_score),
+            "evaluated_count": int(basin.evaluated_count),
+            "incumbent_in_envelope": bool(basin.incumbent_in_envelope),
+        }
 
     def _record_zoom(
         self,
-        selected: Basin,
+        *,
+        phase: PhaseName,
+        selected: Basin | None,
         old_bounds: np.ndarray,
         new_bounds: np.ndarray,
         steps: int,
-        reason: str,
-        *,
         evaluations_before: int,
         best_value_before: float,
-        incumbent_point_before_zoom: np.ndarray,
-        late_stage_mode: bool = False,
-        intensification_rounds: int = 0,
-        projected_shrink_ratio: float = 1.0,
-        focus_mask_coverage: float = 0.0,
-        late_stage_exit_reason: str = "none",
-        selection_reason: str | None = None,
-        microgrid_summary: dict[ str, object ] | None = None,
-        translation_summary: dict[ str, object ] | None = None,
-        pattern_search_summary: dict[ str, object ] | None = None,
+        details: dict[str, object],
     ) -> None:
-        box_id = int( len( self.zoom_events ) )
-        diagnostics = self._basin_diagnostics( selected )
+        state = self._require_state()
+        diagnostics = self._basin_diagnostics(selected)
+        old_area = self._bounds_area_for_progress(old_bounds)
+        new_area = self._bounds_area_for_progress(new_bounds)
+        shrink_ratio = new_area / old_area if np.isfinite(old_area) and old_area > 0.0 and np.isfinite(new_area) else 0.0
         diagnostics.update(
             {
-                "accepted": True,
-                "decision_reason": str( reason ),
-                "selection_reason": str( selection_reason or reason ),
-                "box_id": box_id,
-                "evaluations_before": int( evaluations_before ),
-                "evaluations_after": int( self.engine.state.evaluations if self.engine.state is not None else evaluations_before ),
-                "best_value_before": float( best_value_before ),
-                "best_value_after": float( self.engine.state.best_value if self.engine.state is not None else best_value_before ),
-                "incumbent_point_before_zoom": np.asarray( incumbent_point_before_zoom, dtype=float ).tolist(),
-                "late_stage_mode": bool( late_stage_mode ),
-                "intensification_rounds": int( intensification_rounds ),
-                "projected_shrink_ratio": float( projected_shrink_ratio ),
-                "focus_mask_coverage": float( focus_mask_coverage ),
-                "late_stage_exit_reason": str( late_stage_exit_reason ),
+                "phase": phase,
+                "zoom_reason": str(details.get("zoom_reason", phase)),
+                "evaluations_before": int(evaluations_before),
+                "evaluations_after": int(state.evaluations),
+                "best_value_before": float(best_value_before),
+                "best_value_after": float(state.best_value),
+                "budget_fraction": self._budget_fraction(),
+                "shrink_ratio": float(shrink_ratio),
+                **details,
             }
         )
-        diagnostics.update(
-            self._late_stage_summary_payload(
-                box_id=box_id,
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-        )
+        bbox = selected.bbox_world.copy() if selected is not None else new_bounds.copy()
         self.zoom_events.append(
             ZoomEvent(
-                zoom_index=len( self.zoom_events ),
-                old_bounds=old_bounds,
+                zoom_index=len(self.zoom_events),
+                old_bounds=old_bounds.copy(),
                 new_bounds=new_bounds.copy(),
-                selected_basin_score=float( selected.combined_score ),
-                selected_basin_bbox=selected.bbox_world.copy(),
-                evaluation_count=int( self.engine.state.evaluations if self.engine.state is not None else 0 ),
-                steps_per_zoom=steps,
+                selected_basin_score=float(selected.combined_score) if selected is not None else 0.0,
+                selected_basin_bbox=bbox,
+                evaluation_count=int(state.evaluations),
+                steps_per_zoom=int(steps),
                 diagnostics=diagnostics,
             )
         )
         if self.engine.snapshots:
-            snapshot = self.engine.snapshots[ -1 ]
-            snapshot.selected_basin_bbox = selected.bbox_world.copy()
-            snapshot.metadata[ "zoom_decision" ] = "accepted"
-            snapshot.metadata[ "zoom_reason" ] = reason
-            snapshot.metadata[ "selected_basin_diagnostics" ] = diagnostics
-            snapshot.metadata[ "late_stage_mode" ] = bool( late_stage_mode )
-            snapshot.metadata[ "intensification_rounds" ] = int( intensification_rounds )
-            snapshot.metadata[ "projected_shrink_ratio" ] = float( projected_shrink_ratio )
-            snapshot.metadata[ "focus_mask_coverage" ] = float( focus_mask_coverage )
-            snapshot.metadata[ "late_stage_exit_reason" ] = str( late_stage_exit_reason )
-            snapshot.metadata.update(
-                self._late_stage_summary_payload(
-                    box_id=box_id,
-                    microgrid_summary=microgrid_summary,
-                    translation_summary=translation_summary,
-                    pattern_search_summary=pattern_search_summary,
-                )
-            )
+            snapshot = self.engine.snapshots[-1]
+            snapshot.selected_basin_bbox = bbox
+            snapshot.metadata["phase"] = phase
+            snapshot.metadata["zoom_decision"] = "accepted"
+            snapshot.metadata["zoom_reason"] = diagnostics["zoom_reason"]
+            snapshot.metadata["selected_basin_diagnostics"] = diagnostics
 
-    def step( self ) -> bool:
-        """Run one AGSLS decision round. Returns True when a zoom is accepted."""
+    def _record_decision(
+        self,
+        *,
+        phase: PhaseName,
+        accepted: bool,
+        reason: str,
+        evaluations_before: int,
+        bounds_before: np.ndarray,
+        selected: Basin | None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        state = self._require_state()
+        self._decision_trace.append(
+            {
+                "phase": phase,
+                "accepted": bool(accepted),
+                "reason": str(reason),
+                "evaluations_before": int(evaluations_before),
+                "evaluations_after": int(state.evaluations),
+                "bounds_before": np.asarray(bounds_before, dtype=float).tolist(),
+                "bounds_after": np.asarray(state.bounds, dtype=float).tolist(),
+                "best_value_after": float(state.best_value),
+                "selected_basin": self._basin_diagnostics(selected),
+                **(details or {}),
+            }
+        )
 
-        zoom_index = len( self.zoom_events )
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        evaluations_before = int( state.evaluations )
-        best_value_before = float( state.best_value )
+    def _decision_round(self, phase: PhaseName) -> bool:
+        state = self._require_state()
+        evaluations_before = int(state.evaluations)
+        best_value_before = float(state.best_value)
         bounds_before = state.bounds.copy()
-        incumbent_point_before_zoom = state.best_point.copy()
-        active_limit = self._active_zoom_limit if self._active_zoom_limit is not None else self.agsls_config.max_zoom_cycles
-        self.engine.set_zoom_index( zoom_index, max_zoom_cycles=active_limit )
-        self.apply_runtime_policy( AGSLS_PER_DECISION_FIELDS )
-        self.apply_runtime_policy( ZOOM_BOUNDARY_FIELDS )
-        self.engine.apply_runtime_policy( ZOOM_BOUNDARY_FIELDS, rebuild_kernels=True )
-        self.apply_runtime_policy( SMOOTHLIFE_PER_STEP_FIELDS )
-        self.engine.apply_runtime_policy( SMOOTHLIFE_PER_STEP_FIELDS, rebuild_kernels=False )
-        late_stage_state = self._late_stage_state( box_id=zoom_index, active_limit=active_limit, bounds=bounds_before )
-        microgrid_summary = self._empty_microgrid_summary()
-        translation_summary = self._empty_translation_summary()
-        pattern_search_summary = self._empty_pattern_search_summary()
-        scheduled_step_batch = int( self.engine.config.evaluations_per_step )
-        self.engine.config.evaluations_per_step = self._late_stage_step_batch( scheduled_step_batch, late_stage_state=late_stage_state )
-        steps = steps_for_zoom_cycle( self.agsls_config, zoom_index )
-        persistence = self._persistence_map( steps, box_id=zoom_index, late_stage_state=late_stage_state )
-        ranked = self._rank_basins( persistence )
-        self._update_basin_runtime_state( ranked )
-        self._probe_basins( ranked )
-        ranked = self._rank_basins( persistence )
-        self._update_basin_runtime_state( ranked )
-        eligible = self._eligible_basins( ranked )
-        if not eligible:
-            self.engine.config.evaluations_per_step = scheduled_step_batch
-            self._mark_latest_snapshot(
-                box_id=zoom_index,
-                decision="deferred_no_eligible_group",
-                basins=ranked,
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            self._record_decision_reason( "deferred_no_eligible_group" )
-            state = self.engine.state
-            if state is None:
-                raise RuntimeError( "engine state missing" )
-            self._record_decision_trace(
-                box_id=zoom_index,
-                accepted=False,
-                decision_reason="deferred_no_eligible_group",
-                evaluations_before=evaluations_before,
-                evaluations_after=int( state.evaluations ),
-                best_value_before=best_value_before,
-                best_value_after=float( state.best_value ),
-                bounds_before=bounds_before,
-                bounds_after=state.bounds.copy(),
-                selected_basin=ranked[ 0 ] if ranked else None,
-                incumbent_point_before_zoom=incumbent_point_before_zoom,
-                late_stage_mode=bool( late_stage_state.get( "late_stage_mode", False ) ),
-                intensification_rounds=int( late_stage_state.get( "intensification_rounds", 0 ) ),
-                projected_shrink_ratio=1.0,
-                focus_mask_coverage=0.0,
-                late_stage_exit_reason="no_eligible_group",
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            return False
-
-        explored_in_stage = 0
-        decision_ready, decision_reason = self._should_choose_leader( eligible, explored_in_stage )
-        while not decision_ready and not self._max_evaluations_reached():
-            top_groups = eligible[ : min( 3, len( eligible ) ) ]
-            union_mask = np.zeros_like( top_groups[ 0 ].mask, dtype=bool )
-            for basin in top_groups:
-                union_mask |= basin.mask
-            remaining = self.agsls_config.undecided_stage_max_evaluations - explored_in_stage
-            if remaining <= 0:
-                decision_reason = "exploration_cap"
-                break
-            batch_size = self._bounded_evaluation_batch( min( self.agsls_config.candidate_probe_evaluations, remaining ) )
-            if batch_size <= 0:
-                decision_ready = True
-                decision_reason = "evaluation_limit"
-                break
-            gained = self.engine.explore_top_pixels(
-                batch_size,
-                mask=union_mask,
-                score_field=self._probe_score_field(),
-            )
-            explored_in_stage += int( gained )
-            ranked = self._rank_basins( persistence )
-            eligible = self._eligible_basins( ranked )
-            if not eligible:
-                self.engine.config.evaluations_per_step = scheduled_step_batch
-                self._mark_latest_snapshot(
-                    box_id=zoom_index,
-                    decision="deferred_groups_lost",
-                    basins=ranked,
-                    microgrid_summary=microgrid_summary,
-                    translation_summary=translation_summary,
-                    pattern_search_summary=pattern_search_summary,
-                )
-                self._record_decision_reason( "deferred_groups_lost" )
-                state = self.engine.state
-                if state is None:
-                    raise RuntimeError( "engine state missing" )
-                self._record_decision_trace(
-                    box_id=zoom_index,
-                    accepted=False,
-                    decision_reason="deferred_groups_lost",
-                    evaluations_before=evaluations_before,
-                    evaluations_after=int( state.evaluations ),
-                    best_value_before=best_value_before,
-                    best_value_after=float( state.best_value ),
-                    bounds_before=bounds_before,
-                    bounds_after=state.bounds.copy(),
-                    selected_basin=ranked[ 0 ] if ranked else None,
-                    incumbent_point_before_zoom=incumbent_point_before_zoom,
-                    late_stage_mode=bool( late_stage_state.get( "late_stage_mode", False ) ),
-                    intensification_rounds=int( self._late_stage_round_counts.get( zoom_index, 0 ) ),
-                    projected_shrink_ratio=1.0,
-                    focus_mask_coverage=0.0,
-                    late_stage_exit_reason="groups_lost",
-                    microgrid_summary=microgrid_summary,
-                    translation_summary=translation_summary,
-                    pattern_search_summary=pattern_search_summary,
-                )
-                return False
-            decision_ready, decision_reason = self._should_choose_leader( eligible, explored_in_stage )
-            if gained == 0:
-                decision_ready = True
-                decision_reason = "no_unexplored_cells"
-
-        selected = self._select_basin( eligible )
-        new_bounds = self._padded_bounds( selected )
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        old_bounds = state.bounds.copy()
-        should_intensify, projected_shrink_ratio, late_stage_exit_reason = self._should_intensify(
-            box_id=zoom_index,
-            basin=selected,
-            old_bounds=old_bounds,
-            new_bounds=new_bounds,
-            late_stage_state=late_stage_state,
-        )
-        translation_accepted = False
-        if should_intensify:
-            translation_result = TranslationZoom( self ).run(
-                selected,
-                old_bounds,
-                new_bounds,
-                late_stage_exit_reason,
-            )
-            if translation_result is not None:
-                new_bounds, translation_summary = translation_result
-                translation_accepted = True
-                should_intensify = False
-                projected_shrink_ratio = self._projected_shrink_ratio( old_bounds, new_bounds )
-                late_stage_exit_reason = "translated_zoom"
-        exploiter_kind = "none"
-        exploiter_result: tuple[ np.ndarray, dict[ str, object ] ] | None = None
-        if not translation_accepted and bool( late_stage_state.get( "late_stage_mode", False ) ):
-            exploiter_kind, exploiter_result = self._run_late_stage_exploiter( selected, old_bounds )
-        if exploiter_result is not None:
-            exploiter_bounds, exploiter_summary = exploiter_result
-            if exploiter_kind == "microgrid":
-                microgrid_summary = exploiter_summary
-                late_stage_exit_reason = "microgrid_refine"
-            elif exploiter_kind == "pattern_search":
-                pattern_search_summary = exploiter_summary
-                late_stage_exit_reason = "pattern_search_refine"
-            new_bounds = exploiter_bounds
-            should_intensify = False
-            projected_shrink_ratio = self._projected_shrink_ratio( old_bounds, new_bounds )
-        late_stage_mode = (
-            bool( late_stage_state.get( "late_stage_mode", False ) )
-            or should_intensify
-            or translation_accepted
-            or np.allclose( new_bounds, old_bounds )
-        )
-        if should_intensify:
-            gained, focus_mask_coverage = self._run_late_stage_intensification( selected )
-            intensification_rounds = int( self._late_stage_round_counts.get( zoom_index, 0 ) ) + 1
-            self._late_stage_round_counts[ zoom_index ] = intensification_rounds
-            self.engine.config.evaluations_per_step = scheduled_step_batch
-            self._mark_latest_snapshot(
-                box_id=zoom_index,
-                decision="late_stage_intensify",
-                basins=eligible,
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            if self.engine.snapshots:
-                snapshot = self.engine.snapshots[ -1 ]
-                snapshot.metadata[ "zoom_reason" ] = "late_stage_intensify"
-                snapshot.metadata[ "late_stage_mode" ] = True
-                snapshot.metadata[ "intensification_rounds" ] = int( intensification_rounds )
-                snapshot.metadata[ "projected_shrink_ratio" ] = float( projected_shrink_ratio )
-                snapshot.metadata[ "focus_mask_coverage" ] = float( focus_mask_coverage )
-                snapshot.metadata[ "late_stage_exit_reason" ] = str( late_stage_exit_reason )
-                snapshot.metadata.update(
-                    self._late_stage_summary_payload(
-                        box_id=zoom_index,
-                        microgrid_summary=microgrid_summary,
-                        translation_summary=translation_summary,
-                        pattern_search_summary=pattern_search_summary,
-                    )
-                )
-            self._record_decision_reason( "late_stage_intensify" )
-            state = self.engine.state
-            if state is None:
-                raise RuntimeError( "engine state missing" )
-            self._record_decision_trace(
-                box_id=zoom_index,
-                accepted=False,
-                decision_reason="late_stage_intensify",
-                evaluations_before=evaluations_before,
-                evaluations_after=int( state.evaluations ),
-                best_value_before=best_value_before,
-                best_value_after=float( state.best_value ),
-                bounds_before=bounds_before,
-                bounds_after=state.bounds.copy(),
-                selected_basin=selected,
-                incumbent_point_before_zoom=incumbent_point_before_zoom,
-                late_stage_mode=True,
-                intensification_rounds=intensification_rounds,
-                projected_shrink_ratio=projected_shrink_ratio,
-                focus_mask_coverage=focus_mask_coverage,
-                late_stage_exit_reason=late_stage_exit_reason,
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            return False
-        if np.allclose( new_bounds, old_bounds ):
-            self.engine.config.evaluations_per_step = scheduled_step_batch
-            self._mark_latest_snapshot(
-                box_id=zoom_index,
-                decision="deferred_no_shrink",
-                basins=eligible,
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            self._record_decision_reason( "deferred_no_shrink" )
-            self._record_decision_trace(
-                box_id=zoom_index,
-                accepted=False,
-                decision_reason="deferred_no_shrink",
-                evaluations_before=evaluations_before,
-                evaluations_after=int( state.evaluations ),
-                best_value_before=best_value_before,
-                best_value_after=float( state.best_value ),
-                bounds_before=bounds_before,
-                bounds_after=state.bounds.copy(),
-                selected_basin=selected,
-                incumbent_point_before_zoom=incumbent_point_before_zoom,
-                late_stage_mode=late_stage_mode,
-                intensification_rounds=int( self._late_stage_round_counts.get( zoom_index, 0 ) ),
-                projected_shrink_ratio=projected_shrink_ratio,
-                focus_mask_coverage=0.0,
-                late_stage_exit_reason="no_shrink",
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            return False
-        remaining = self._remaining_evaluations()
-        if remaining is not None and remaining < self.engine.config.evaluations_per_step:
-            self.engine.config.evaluations_per_step = scheduled_step_batch
-            self._mark_latest_snapshot(
-                box_id=zoom_index,
-                decision="deferred_evaluation_limit",
-                basins=eligible,
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            self._record_decision_reason( "deferred_evaluation_limit" )
-            self._record_decision_trace(
-                box_id=zoom_index,
-                accepted=False,
-                decision_reason="deferred_evaluation_limit",
-                evaluations_before=evaluations_before,
-                evaluations_after=int( state.evaluations ),
-                best_value_before=best_value_before,
-                best_value_after=float( state.best_value ),
-                bounds_before=bounds_before,
-                bounds_after=state.bounds.copy(),
-                selected_basin=selected,
-                incumbent_point_before_zoom=incumbent_point_before_zoom,
-                late_stage_mode=late_stage_mode,
-                intensification_rounds=int( self._late_stage_round_counts.get( zoom_index, 0 ) ),
-                projected_shrink_ratio=projected_shrink_ratio,
-                focus_mask_coverage=0.0,
-                late_stage_exit_reason="evaluation_limit",
-                microgrid_summary=microgrid_summary,
-                translation_summary=translation_summary,
-                pattern_search_summary=pattern_search_summary,
-            )
-            return False
-        self.engine.config.evaluations_per_step = scheduled_step_batch
-        accepted_reason = decision_reason
-        intensification_rounds = int( self._late_stage_round_counts.get( zoom_index, 0 ) )
-        accepted_exit_reason = late_stage_exit_reason
-        if translation_accepted:
-            accepted_reason = "late_stage_translate_zoom"
-        elif intensification_rounds > 0:
-            accepted_reason = "late_stage_resume_zoom"
-            accepted_exit_reason = "resume_zoom"
-        self.engine.remap_to_bounds( new_bounds )
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
-        self._record_zoom(
-            selected,
-            old_bounds,
-            new_bounds,
+        self._phase_counts[phase] += 1
+        self.engine.set_zoom_index(len(self.zoom_events), self._active_zoom_limit or self.agsls_config.max_zoom_cycles)
+        self._apply_phase_parameters(phase)
+        steps = self.agsls_config.commit_steps_per_zoom if phase == "commit" else self.agsls_config.exploitation_steps_per_zoom
+        min_explored_fraction = self.agsls_config.commit_min_explored_fraction if phase == "commit" else 0.0
+        reserve_evaluations = self.engine.config.evaluations_per_step if phase == "exploitation" else 0
+        persistence = self._persistence_map(
             steps,
-            accepted_reason,
-            evaluations_before=evaluations_before,
-            best_value_before=best_value_before,
-            incumbent_point_before_zoom=incumbent_point_before_zoom,
-            late_stage_mode=late_stage_mode,
-            intensification_rounds=intensification_rounds,
-            projected_shrink_ratio=projected_shrink_ratio,
-            focus_mask_coverage=0.0,
-            late_stage_exit_reason=accepted_exit_reason,
-            selection_reason=decision_reason,
-            microgrid_summary=microgrid_summary,
-            translation_summary=translation_summary,
-            pattern_search_summary=pattern_search_summary,
+            min_explored_fraction=min_explored_fraction,
+            reserve_evaluations=reserve_evaluations,
         )
-        self._record_decision_reason( accepted_reason, accepted=True )
-        self._record_decision_trace(
-            box_id=zoom_index,
-            accepted=True,
-            decision_reason=accepted_reason,
+        self._archive_current_grid_samples()
+        explored_fraction_before_zoom = float(np.mean(self._require_state().evaluated_mask))
+        ranked = self._rank_basins_for_phase(phase, persistence)
+        selected = ranked[0] if ranked else None
+        trust_region_details = (
+            self._run_trust_region_batch(phase, selected, bounds_before)
+            if phase in ("commit", "exploitation")
+            else {}
+        )
+        valley_details = (
+            self._track_exploitation_valley(selected, bounds_before)
+            if phase == "exploitation" and not self.agsls_config.trust_region_enabled
+            else {}
+        )
+        new_bounds, details = self._zoom_bounds_for_phase(phase, selected, trust_region_details=trust_region_details)
+        details.update(trust_region_details)
+        details.update(valley_details)
+        details.setdefault("explored_fraction_before_zoom", explored_fraction_before_zoom)
+        reason = str(details.get("zoom_reason", phase))
+        if new_bounds is None or self._remaining_evaluations() <= 0:
+            trust_progressed = int(trust_region_details.get("trust_region_evaluations", 0) or 0) > 0
+            if self.engine.snapshots:
+                self.engine.snapshots[-1].metadata["phase"] = phase
+                self.engine.snapshots[-1].metadata["zoom_decision"] = "deferred"
+                self.engine.snapshots[-1].metadata["zoom_reason"] = reason
+            self._record_decision(
+                phase=phase,
+                accepted=False,
+                reason=reason,
+                evaluations_before=evaluations_before,
+                bounds_before=bounds_before,
+                selected=selected,
+                details=details,
+            )
+            return bool(trust_progressed)
+        self.engine.remap_to_bounds(new_bounds)
+        if trust_region_details and self._trust_region_events:
+            self._trust_region_events[-1]["trust_region_remap"] = True
+            trust_region_details["trust_region_remap"] = True
+        self._archive_current_grid_samples()
+        self._record_zoom(
+            phase=phase,
+            selected=selected,
+            old_bounds=bounds_before,
+            new_bounds=new_bounds,
+            steps=steps,
             evaluations_before=evaluations_before,
-            evaluations_after=int( state.evaluations ),
             best_value_before=best_value_before,
-            best_value_after=float( state.best_value ),
+            details=details,
+        )
+        self._record_decision(
+            phase=phase,
+            accepted=True,
+            reason=reason,
+            evaluations_before=evaluations_before,
             bounds_before=bounds_before,
-            bounds_after=state.bounds.copy(),
-            selected_basin=selected,
-            incumbent_point_before_zoom=incumbent_point_before_zoom,
-            late_stage_mode=late_stage_mode,
-            intensification_rounds=intensification_rounds,
-            projected_shrink_ratio=projected_shrink_ratio,
-            focus_mask_coverage=0.0,
-            late_stage_exit_reason=accepted_exit_reason,
-            microgrid_summary=microgrid_summary,
-            translation_summary=translation_summary,
-            pattern_search_summary=pattern_search_summary,
+            selected=selected,
+            details=details,
         )
         return True
 
-    def _run_explore_phase( self, eval_limit: int | None ) -> None:
-        """R8 explore phase: run SmoothLife steps without zooming until
-        ``budget_fraction`` reaches ``phase_explore_end_fraction``.
-
-        No-op when ``time_phased_enabled`` is False or no eval budget is set.
-        """
-
-        if not self.agsls_config.time_phased_enabled:
-            return
-        if eval_limit is None:
-            return
-        explore_end = float( self.agsls_config.phase_explore_end_fraction )
-        steps_per_tick = int( self.agsls_config.explore_phase_smoothlife_steps )
-        while True:
-            state = self.engine.state
-            if state is None:
-                raise RuntimeError( "engine state missing" )
-            if int( state.evaluations ) >= int( eval_limit ):
-                break
-            signals = self.engine.runtime_signals()
-            if signals.budget_fraction() >= explore_end:
-                break
-            previous_evaluations = int( state.evaluations )
-            self.engine.step( steps_per_tick )
-            state = self.engine.state
-            if state is None or int( state.evaluations ) <= previous_evaluations:
-                break
-
-    def run( self, zoom_cycles: int | None = None, evaluations: int | None = None ) -> SearchRun:
-        """Run AGSLS until the zoom or evaluation limit is reached."""
-
-        configured_limit = self.agsls_config.max_zoom_cycles if zoom_cycles is None else int( zoom_cycles )
-        eval_limit = self.agsls_config.max_evaluations if evaluations is None else int( evaluations )
-        limit = self._effective_zoom_limit( eval_limit, configured_limit )
-        self.active_max_evaluations = eval_limit
-        self.engine.active_max_evaluations = eval_limit
-        self._active_zoom_limit = limit
-        self.engine.set_zoom_index( len( self.zoom_events ), max_zoom_cycles=limit )
-        decision_rounds = 0
-        max_rounds = max( limit * 4, limit )
-        final_polish_summary: dict[ str, object ] | None = None
+    def _run_exploration_phase(self, eval_limit: int) -> None:
+        target = int(round(float(eval_limit) * self.agsls_config.exploration_fraction))
+        self._apply_phase_parameters("exploration")
+        previous_engine_limit = self.engine.active_max_evaluations
+        self.engine.active_max_evaluations = min(int(eval_limit), max(int(target), int(self._require_state().evaluations)))
         try:
-            self._run_explore_phase( eval_limit )
-            while len( self.zoom_events ) < limit:
-                state = self.engine.state
-                if state is None:
-                    raise RuntimeError( "engine state missing" )
-                if eval_limit is not None and state.evaluations >= eval_limit:
+            while int(self._require_state().evaluations) < target and not self._max_evaluations_reached():
+                self._phase_counts["exploration"] += 1
+                before = int(self._require_state().evaluations)
+                self._run_engine_steps(self.agsls_config.exploration_steps_per_tick)
+                if self.engine.snapshots:
+                    self.engine.snapshots[-1].metadata["phase"] = "exploration"
+                    self.engine.snapshots[-1].metadata["zoom_decision"] = "none"
+                if int(self._require_state().evaluations) <= before:
                     break
-                remaining = self._remaining_evaluations()
-                if remaining is not None and remaining < self.engine.config.evaluations_per_step:
+        finally:
+            self.engine.active_max_evaluations = previous_engine_limit
+
+    def _run_commit_phase(self, eval_limit: int, zoom_limit: int) -> None:
+        target = int(round(float(eval_limit) * self.agsls_config.commit_fraction))
+        previous_engine_limit = self.engine.active_max_evaluations
+        self.engine.active_max_evaluations = min(int(eval_limit), max(int(target), int(self._require_state().evaluations)))
+        try:
+            while (
+                int(self._require_state().evaluations) < target
+                and len(self.zoom_events) < zoom_limit
+                and not self._max_evaluations_reached()
+            ):
+                before_evaluations = int(self._require_state().evaluations)
+                before_zooms = len(self.zoom_events)
+                self._decision_round("commit")
+                progressed = int(self._require_state().evaluations) > before_evaluations or len(self.zoom_events) > before_zooms
+                if not progressed:
                     break
-                widths = state.bounds[ :, 1 ] - state.bounds[ :, 0 ]
-                min_widths = self.agsls_config.min_side_fraction * ( self.original_bounds[ :, 1 ] - self.original_bounds[ :, 0 ] )
-                if np.all( widths <= min_widths ):
-                    break
-                previous_evaluations = int( state.evaluations )
-                previous_zoom_count = len( self.zoom_events )
-                accepted = self.step()
-                decision_rounds += 1
-                state = self.engine.state
-                if state is None:
-                    raise RuntimeError( "engine state missing" )
-                made_progress = int( state.evaluations ) > previous_evaluations or len( self.zoom_events ) > previous_zoom_count
-                if accepted and self.agsls_config.inter_zoom_polish_enabled:
-                    self._run_inter_zoom_polish()
-                    state = self.engine.state
-                    if state is None:
-                        raise RuntimeError( "engine state missing" )
-                if not accepted and not made_progress:
-                    break
-                if eval_limit is None and decision_rounds >= max_rounds:
-                    break
-            final_polish_summary = self._run_final_polish()
+        finally:
+            self.engine.active_max_evaluations = previous_engine_limit
+
+    def _run_exploitation_phase(self, zoom_limit: int) -> None:
+        while len(self.zoom_events) < zoom_limit and not self._max_evaluations_reached():
+            accepted = self._decision_round("exploitation")
+            if not accepted:
+                break
+
+    def step(self) -> bool:
+        """Run one phase-appropriate AGSLS action."""
+
+        phase = self._phase_for_budget()
+        if phase == "exploration":
+            before = int(self._require_state().evaluations)
+            self._apply_phase_parameters("exploration")
+            self._run_engine_steps(self.agsls_config.exploration_steps_per_tick)
+            self._phase_counts["exploration"] += 1
+            return int(self._require_state().evaluations) > before
+        return self._decision_round(phase)
+
+    def run(self, zoom_cycles: int | None = None, evaluations: int | None = None) -> SearchRun:
+        """Run AGSLS through exploration, commit, and exploitation phases."""
+
+        eval_limit = self.agsls_config.max_evaluations if evaluations is None else int(evaluations)
+        if eval_limit is None:
+            raise ValueError("AGSLS runs require max_evaluations or run(evaluations=...)")
+        if eval_limit <= 0:
+            raise ValueError("evaluation limit must be positive")
+        zoom_limit = self.agsls_config.max_zoom_cycles if zoom_cycles is None else int(zoom_cycles)
+        if zoom_limit <= 0:
+            raise ValueError("zoom_cycles must be positive")
+        self.active_max_evaluations = int(eval_limit)
+        self.engine.active_max_evaluations = int(eval_limit)
+        self._active_zoom_limit = int(zoom_limit)
+        try:
+            self._run_exploration_phase(int(eval_limit))
+            self._run_commit_phase(int(eval_limit), int(zoom_limit))
+            self._run_exploitation_phase(int(zoom_limit))
         finally:
             self.active_max_evaluations = None
             self.engine.active_max_evaluations = None
             self._active_zoom_limit = None
-        state = self.engine.state
-        if state is None:
-            raise RuntimeError( "engine state missing" )
+        state = self._require_state()
         return SearchRun(
             best_point=state.best_point.copy(),
-            best_value=float( state.best_value ),
-            evaluations=int( state.evaluations ),
+            best_value=float(state.best_value),
+            evaluations=int(state.evaluations),
             bounds=state.bounds.copy(),
-            snapshots=list( self.engine.snapshots ),
-            zoom_events=list( self.zoom_events ),
+            snapshots=list(self.engine.snapshots),
+            zoom_events=list(self.zoom_events),
             metadata={
                 "mode": "agsls",
-                "zoom_cycles": len( self.zoom_events ),
-                "decision_rounds": len( self._decision_trace ),
-                "schedule_summary": None if self.runtime_policy is None else self.runtime_policy.summary(),
-                "decision_reason_counts": dict( sorted( self._decision_reason_counts.items() ) ),
-                "zoom_acceptance_count": int( self._accepted_zoom_count ),
-                "decision_trace": list( self._decision_trace ),
-                "final_polish": dict( final_polish_summary or { } ),
-                "inter_zoom_polish_history": [ dict( entry ) for entry in self._inter_zoom_polish_history ],
+                "phases": {
+                    "exploration_fraction": float(self.agsls_config.exploration_fraction),
+                    "commit_fraction": float(self.agsls_config.commit_fraction),
+                },
+                "phase_counts": dict(sorted(self._phase_counts.items())),
+                "zoom_cycles": len(self.zoom_events),
+                "decision_trace": list(self._decision_trace),
+                "trust_region_events": list(self._trust_region_events),
+                "sample_archive_size": len(self.sample_archive),
             },
         )
 
-    def zoom_history( self ) -> list[ ZoomEvent ]:
+    def zoom_history(self) -> list[ZoomEvent]:
         """Return recorded zoom events."""
 
-        return list( self.zoom_events )
+        return list(self.zoom_events)
 
-    def snapshot( self ):
+    def snapshot(self):
         """Return the current SmoothLife snapshot."""
 
         return self.engine.snapshot()

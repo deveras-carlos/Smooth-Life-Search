@@ -1,4 +1,4 @@
-"""Configuration for Adaptive Grid Smooth Life Search."""
+"""Configuration for the three-phase Adaptive Grid Smooth Life Search."""
 
 from __future__ import annotations
 
@@ -7,184 +7,216 @@ from dataclasses import dataclass
 
 @dataclass(slots=True)
 class AGSLSConfig:
-    """Policy parameters for adaptive basin zooming."""
+    """Policy parameters for phase-driven basin zooming."""
 
-    max_zoom_cycles: int = 5
-    initial_steps_per_zoom: int = 96
-    min_steps_per_zoom: int = 32
-    zoom_decay: float = 0.2
+    max_evaluations: int | None = None
+    max_zoom_cycles: int = 16
+    exploration_fraction: float = 0.05
+    commit_fraction: float = 0.7
+    exploration_steps_per_tick: int = 16
+    commit_steps_per_zoom: int = 256
+    exploitation_steps_per_zoom: int = 72
     basin_quantile: float = 0.88
     min_basin_cells: int = 24
-    zoom_padding: float = 0.05
-    min_side_fraction: float = 1e-64
-    max_evaluations: int | None = None
-    zoom_cycles_budget_baseline: int | None = 800
-    mass_weight: float = 1.0
-    alive_density_weight: float = 0.75
-    objective_weight: float = 1.5
-    stability_weight: float = 0.75
-    area_penalty: float = 0.20
-    alive_core_threshold: float = 0.30
     min_alive_density: float = 0.20
+    alive_core_threshold: float = 0.30
     cluster_eps_pixels: float = 2.5
     cluster_min_samples: int = 6
-    dominance_margin: float = 0.20
-    similarity_margin: float = 0.05
-    undecided_stage_max_evaluations: int = 64
-    candidate_probe_evaluations: int = 16
     basin_envelope_quantile_offset: float = 0.01
     basin_envelope_growth_pixels: int = 1
-    min_zoom_cells: int = 6
-    incumbent_overlap_bonus: float = 0.20
-    incumbent_exclusion_penalty: float = 0.15
-    edge_risk_fraction: float = 0.20
-    late_stage_zoom_fraction_threshold: float = 0.60
-    late_stage_plateau_threshold: float = 1e-4
-    late_stage_min_shrink_ratio: float = 0.95
-    late_stage_max_rounds: int = 2
-    late_stage_eval_batch: int = 8
-    late_stage_elite_k: int = 4
-    late_stage_focus_radius_cells: int = 3
-    late_stage_microgrid_enabled: bool = False
-    late_stage_microgrid_resolution: int = 5
-    late_stage_microgrid_centers: int = 3
-    late_stage_microgrid_side_fraction: float = 0.25
-    late_stage_translation_enabled: bool = False
-    late_stage_translation_step_fraction: float = 0.25
-    late_stage_translation_min_offset_fraction: float = 0.10
-    late_stage_exploiter: str = "microgrid"
-    late_stage_periodic_local_search_enabled: bool = True
-    late_stage_periodic_local_search_interval_steps: int = 8
-    late_stage_periodic_local_search_initial_step_fraction: float = 0.10
-    late_stage_periodic_local_search_min_step_fraction: float = 0.005
-    late_stage_periodic_local_search_shrink: float = 0.5
-    late_stage_periodic_local_search_max_iterations: int = 12
-    late_stage_periodic_local_search_max_evaluations: int = 48
-    late_stage_pattern_search_initial_step_fraction: float = 0.15
-    late_stage_pattern_search_min_step_fraction: float = 0.00005
-    late_stage_pattern_search_shrink: float = 0.05
-    late_stage_pattern_search_max_iterations: int = 12
-    late_stage_pattern_search_max_evaluations: int = 20
-    late_stage_pattern_search_reuse_tolerance_cells: float = 0.5
-    final_polish_enabled: bool = True
-    final_polish_max_evaluations: int = 512
-    inter_zoom_polish_enabled: bool = True
-    inter_zoom_polish_max_evaluations: int = 64
-    polish_gradient_tolerance: float = 1e-10
-    polish_finite_difference_step: float = 1e-7
-    polish_iterative_refinement_passes: int = 2
-    polish_iterative_refinement_shrink: float = 0.01
-    time_phased_enabled: bool = False
-    phase_explore_end_fraction: float = 0.20
-    phase_commit_end_fraction: float = 0.80
-    explore_phase_smoothlife_steps: int = 16
+    commit_zoom_padding: float = 0.05
+    commit_min_shrink_fraction: float = 0.45
+    commit_min_explored_fraction: float = 0.08
+    commit_incumbent_padding_fraction: float = 0.02
+    exploitation_shrink_fraction: float = 1e-12
+    exploration_objective_gamma: float = 1.0
+    commit_objective_gamma: float = 1.0
+    exploitation_objective_gamma: float = 1.5
+    exploration_support_ema_alpha: float = 0.0
+    commit_support_ema_alpha: float = 0.05
+    exploitation_support_ema_alpha: float = 0.20
+    commit_guidance_top_k: int = 64
+    commit_guidance_sigma: float = 0.12
+    commit_guidance_temperature: float = 0.20
+    commit_uncertainty_weight: float = 0.10
+    commit_drift_strength: float = 0.06
+    exploitation_guidance_top_k: int = 32
+    exploitation_guidance_sigma: float = 0.04
+    exploitation_guidance_temperature: float = 0.10
+    exploitation_uncertainty_weight: float = 0.0
+    exploitation_drift_strength: float = 0.02
+    commit_surrogate_enabled: bool = True
+    commit_surrogate_min_samples: int = 12
+    commit_surrogate_max_samples: int = 96
+    commit_surrogate_regularization: float = 1e-8
+    commit_surrogate_min_predicted_improvement: float = 0.0
+    commit_surrogate_max_condition: float = 1e8
+    commit_surrogate_valley_expand: float = 1.25
+    commit_surrogate_cross_shrink: float = 0.65
+    commit_surrogate_support_weight: float = 0.50
+    exploitation_valley_tracking_enabled: bool = True
+    exploitation_valley_probe_evaluations: int = 8
+    exploitation_valley_step_fraction: float = 0.15
+    exploitation_valley_step_decay: float = 0.50
+    exploitation_valley_min_step_fraction: float = 1e-4
+    exploitation_valley_surrogate_min_samples: int = 12
+    exploitation_valley_surrogate_max_samples: int = 96
+    trust_region_enabled: bool = True
+    commit_trust_region_evaluations: int = 8
+    exploitation_trust_region_evaluations: int = 16
+    trust_region_candidate_pool_size: int = 128
+    trust_region_initial_radius_fraction: float = 0.25
+    trust_region_min_radius_fraction: float = 1e-14
+    trust_region_shrink_factor: float = 0.50
+    trust_region_expand_factor: float = 1.40
+    commit_acquisition_uncertainty_weight: float = 0.30
+    exploitation_acquisition_uncertainty_weight: float = 0.05
+    trust_region_support_weight: float = 0.25
+    commit_mass_weight: float = 1.35
+    commit_density_weight: float = 1.20
+    commit_stability_weight: float = 1.00
+    commit_objective_weight: float = 0.45
+    commit_area_penalty: float = 0.15
 
     def __post_init__(self) -> None:
+        if self.max_evaluations is not None and self.max_evaluations <= 0:
+            raise ValueError("max_evaluations must be positive when set")
         if self.max_zoom_cycles <= 0:
             raise ValueError("max_zoom_cycles must be positive")
-        if self.initial_steps_per_zoom <= 0 or self.min_steps_per_zoom <= 0:
-            raise ValueError("steps_per_zoom values must be positive")
-        if self.min_steps_per_zoom > self.initial_steps_per_zoom:
-            raise ValueError("min_steps_per_zoom cannot exceed initial_steps_per_zoom")
-        if not 0.0 < self.zoom_decay <= 1.0:
-            raise ValueError("zoom_decay must be in (0, 1]")
+        if not 0.0 <= self.exploration_fraction < self.commit_fraction < 1.0:
+            raise ValueError("require 0 <= exploration_fraction < commit_fraction < 1")
+        if self.exploration_steps_per_tick <= 0:
+            raise ValueError("exploration_steps_per_tick must be positive")
+        if self.commit_steps_per_zoom <= 0:
+            raise ValueError("commit_steps_per_zoom must be positive")
+        if self.exploitation_steps_per_zoom <= 0:
+            raise ValueError("exploitation_steps_per_zoom must be positive")
         if not 0.0 < self.basin_quantile < 1.0:
             raise ValueError("basin_quantile must be in (0, 1)")
         if self.min_basin_cells <= 0:
             raise ValueError("min_basin_cells must be positive")
-        if self.zoom_padding < 0.0:
-            raise ValueError("zoom_padding must be non-negative")
-        if not 0.0 < self.min_side_fraction <= 1.0:
-            raise ValueError("min_side_fraction must be in (0, 1]")
-        if not 0.0 <= self.alive_core_threshold <= 1.0:
-            raise ValueError("alive_core_threshold must be in [0, 1]")
         if not 0.0 <= self.min_alive_density <= 1.0:
             raise ValueError("min_alive_density must be in [0, 1]")
+        if not 0.0 <= self.alive_core_threshold <= 1.0:
+            raise ValueError("alive_core_threshold must be in [0, 1]")
         if self.cluster_eps_pixels <= 0.0:
             raise ValueError("cluster_eps_pixels must be positive")
         if self.cluster_min_samples <= 0:
             raise ValueError("cluster_min_samples must be positive")
-        if self.undecided_stage_max_evaluations < 0:
-            raise ValueError("undecided_stage_max_evaluations must be non-negative")
-        if self.candidate_probe_evaluations < 0:
-            raise ValueError("candidate_probe_evaluations must be non-negative")
         if not 0.0 <= self.basin_envelope_quantile_offset <= 0.49:
             raise ValueError("basin_envelope_quantile_offset must be in [0, 0.49]")
         if self.basin_envelope_growth_pixels < 0:
             raise ValueError("basin_envelope_growth_pixels must be non-negative")
-        if self.min_zoom_cells <= 0:
-            raise ValueError("min_zoom_cells must be positive")
-        if self.incumbent_overlap_bonus < 0.0:
-            raise ValueError("incumbent_overlap_bonus must be non-negative")
-        if self.incumbent_exclusion_penalty < 0.0:
-            raise ValueError("incumbent_exclusion_penalty must be non-negative")
-        if not 0.0 <= self.edge_risk_fraction <= 0.5:
-            raise ValueError("edge_risk_fraction must be in [0, 0.5]")
-        if self.zoom_cycles_budget_baseline is not None and self.zoom_cycles_budget_baseline <= 0:
-            raise ValueError("zoom_cycles_budget_baseline must be positive when set")
-        if not 0.0 <= self.late_stage_zoom_fraction_threshold <= 1.0:
-            raise ValueError("late_stage_zoom_fraction_threshold must be in [0, 1]")
-        if self.late_stage_plateau_threshold < 0.0:
-            raise ValueError("late_stage_plateau_threshold must be non-negative")
-        if not 0.0 < self.late_stage_min_shrink_ratio <= 1.0:
-            raise ValueError("late_stage_min_shrink_ratio must be in (0, 1]")
-        if self.late_stage_max_rounds < 0:
-            raise ValueError("late_stage_max_rounds must be non-negative")
-        if self.late_stage_eval_batch <= 0:
-            raise ValueError("late_stage_eval_batch must be positive")
-        if self.late_stage_elite_k <= 0:
-            raise ValueError("late_stage_elite_k must be positive")
-        if self.late_stage_focus_radius_cells <= 0:
-            raise ValueError("late_stage_focus_radius_cells must be positive")
-        if self.late_stage_microgrid_resolution <= 0:
-            raise ValueError("late_stage_microgrid_resolution must be positive")
-        if self.late_stage_microgrid_centers <= 0:
-            raise ValueError("late_stage_microgrid_centers must be positive")
-        if not 0.0 < self.late_stage_microgrid_side_fraction <= 1.0:
-            raise ValueError("late_stage_microgrid_side_fraction must be in (0, 1]")
-        if not 0.0 < self.late_stage_translation_step_fraction <= 1.0:
-            raise ValueError("late_stage_translation_step_fraction must be in (0, 1]")
-        if not 0.0 < self.late_stage_translation_min_offset_fraction <= 1.0:
-            raise ValueError("late_stage_translation_min_offset_fraction must be in (0, 1]")
-        if self.late_stage_exploiter not in ("microgrid", "pattern_search", "none"):
-            raise ValueError("late_stage_exploiter must be one of 'microgrid', 'pattern_search', 'none'")
-        if self.late_stage_periodic_local_search_interval_steps <= 0:
-            raise ValueError("late_stage_periodic_local_search_interval_steps must be positive")
-        if not 0.0 < self.late_stage_periodic_local_search_initial_step_fraction <= 1.0:
-            raise ValueError("late_stage_periodic_local_search_initial_step_fraction must be in (0, 1]")
-        if not 0.0 < self.late_stage_periodic_local_search_min_step_fraction <= self.late_stage_periodic_local_search_initial_step_fraction:
-            raise ValueError("late_stage_periodic_local_search_min_step_fraction must be in (0, initial_step_fraction]")
-        if not 0.0 < self.late_stage_periodic_local_search_shrink < 1.0:
-            raise ValueError("late_stage_periodic_local_search_shrink must be in (0, 1)")
-        if self.late_stage_periodic_local_search_max_iterations <= 0:
-            raise ValueError("late_stage_periodic_local_search_max_iterations must be positive")
-        if self.late_stage_periodic_local_search_max_evaluations <= 0:
-            raise ValueError("late_stage_periodic_local_search_max_evaluations must be positive")
-        if not 0.0 < self.late_stage_pattern_search_initial_step_fraction <= 1.0:
-            raise ValueError("late_stage_pattern_search_initial_step_fraction must be in (0, 1]")
-        if not 0.0 < self.late_stage_pattern_search_min_step_fraction <= self.late_stage_pattern_search_initial_step_fraction:
-            raise ValueError("late_stage_pattern_search_min_step_fraction must be in (0, initial_step_fraction]")
-        if not 0.0 < self.late_stage_pattern_search_shrink < 1.0:
-            raise ValueError("late_stage_pattern_search_shrink must be in (0, 1)")
-        if self.late_stage_pattern_search_max_iterations <= 0:
-            raise ValueError("late_stage_pattern_search_max_iterations must be positive")
-        if self.late_stage_pattern_search_max_evaluations <= 0:
-            raise ValueError("late_stage_pattern_search_max_evaluations must be positive")
-        if not 0.0 <= self.late_stage_pattern_search_reuse_tolerance_cells <= 1.0:
-            raise ValueError("late_stage_pattern_search_reuse_tolerance_cells must be in [0, 1]")
-        if self.final_polish_max_evaluations <= 0:
-            raise ValueError("final_polish_max_evaluations must be positive")
-        if self.inter_zoom_polish_max_evaluations <= 0:
-            raise ValueError("inter_zoom_polish_max_evaluations must be positive")
-        if not 0.0 < self.polish_gradient_tolerance:
-            raise ValueError("polish_gradient_tolerance must be positive")
-        if not 0.0 < self.polish_finite_difference_step:
-            raise ValueError("polish_finite_difference_step must be positive")
-        if self.polish_iterative_refinement_passes < 0:
-            raise ValueError("polish_iterative_refinement_passes must be non-negative")
-        if not 0.0 < self.polish_iterative_refinement_shrink < 1.0:
-            raise ValueError("polish_iterative_refinement_shrink must be in (0, 1)")
-        if not 0.0 < self.phase_explore_end_fraction < self.phase_commit_end_fraction < 1.0:
-            raise ValueError("require 0 < phase_explore_end_fraction < phase_commit_end_fraction < 1")
-        if self.explore_phase_smoothlife_steps <= 0:
-            raise ValueError("explore_phase_smoothlife_steps must be positive")
+        if self.commit_zoom_padding < 0.0:
+            raise ValueError("commit_zoom_padding must be non-negative")
+        if not 0.0 < self.commit_min_shrink_fraction <= 1.0:
+            raise ValueError("commit_min_shrink_fraction must be in (0, 1]")
+        if not 0.0 <= self.commit_min_explored_fraction <= 1.0:
+            raise ValueError("commit_min_explored_fraction must be in [0, 1]")
+        if self.commit_incumbent_padding_fraction < 0.0:
+            raise ValueError("commit_incumbent_padding_fraction must be non-negative")
+        if not 0.0 < self.exploitation_shrink_fraction < 1.0:
+            raise ValueError("exploitation_shrink_fraction must be in (0, 1)")
+        for field_name in (
+            "exploration_objective_gamma",
+            "commit_objective_gamma",
+            "exploitation_objective_gamma",
+        ):
+            if getattr(self, field_name) <= 0.0:
+                raise ValueError(f"{field_name} must be positive")
+        for field_name in (
+            "exploration_support_ema_alpha",
+            "commit_support_ema_alpha",
+            "exploitation_support_ema_alpha",
+        ):
+            if not 0.0 <= getattr(self, field_name) <= 1.0:
+                raise ValueError(f"{field_name} must be in [0, 1]")
+        for field_name in (
+            "commit_guidance_top_k",
+            "exploitation_guidance_top_k",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name} must be positive")
+        for field_name in (
+            "commit_guidance_sigma",
+            "commit_guidance_temperature",
+            "exploitation_guidance_sigma",
+            "exploitation_guidance_temperature",
+        ):
+            if getattr(self, field_name) <= 0.0:
+                raise ValueError(f"{field_name} must be positive")
+        for field_name in (
+            "commit_uncertainty_weight",
+            "commit_drift_strength",
+            "exploitation_uncertainty_weight",
+            "exploitation_drift_strength",
+        ):
+            if getattr(self, field_name) < 0.0:
+                raise ValueError(f"{field_name} must be non-negative")
+        for field_name in (
+            "commit_surrogate_min_samples",
+            "commit_surrogate_max_samples",
+            "exploitation_valley_surrogate_min_samples",
+            "exploitation_valley_surrogate_max_samples",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name} must be positive")
+        if self.commit_surrogate_max_samples < self.commit_surrogate_min_samples:
+            raise ValueError("commit_surrogate_max_samples must be >= commit_surrogate_min_samples")
+        if self.exploitation_valley_surrogate_max_samples < self.exploitation_valley_surrogate_min_samples:
+            raise ValueError("exploitation_valley_surrogate_max_samples must be >= exploitation_valley_surrogate_min_samples")
+        for field_name in (
+            "commit_surrogate_regularization",
+            "commit_surrogate_min_predicted_improvement",
+            "commit_surrogate_max_condition",
+            "commit_surrogate_valley_expand",
+            "commit_surrogate_cross_shrink",
+            "commit_surrogate_support_weight",
+        ):
+            if getattr(self, field_name) < 0.0:
+                raise ValueError(f"{field_name} must be non-negative")
+        if self.exploitation_valley_probe_evaluations < 0:
+            raise ValueError("exploitation_valley_probe_evaluations must be non-negative")
+        if not 0.0 < self.exploitation_valley_step_fraction <= 1.0:
+            raise ValueError("exploitation_valley_step_fraction must be in (0, 1]")
+        if not 0.0 < self.exploitation_valley_step_decay < 1.0:
+            raise ValueError("exploitation_valley_step_decay must be in (0, 1)")
+        if not 0.0 < self.exploitation_valley_min_step_fraction <= self.exploitation_valley_step_fraction:
+            raise ValueError("exploitation_valley_min_step_fraction must be in (0, step_fraction]")
+        for field_name in (
+            "commit_trust_region_evaluations",
+            "exploitation_trust_region_evaluations",
+            "trust_region_candidate_pool_size",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name} must be positive")
+        if not 0.0 < self.trust_region_initial_radius_fraction <= 1.0:
+            raise ValueError("trust_region_initial_radius_fraction must be in (0, 1]")
+        if not 0.0 < self.trust_region_min_radius_fraction <= self.trust_region_initial_radius_fraction:
+            raise ValueError("trust_region_min_radius_fraction must be in (0, initial_radius_fraction]")
+        if not 0.0 < self.trust_region_shrink_factor < 1.0:
+            raise ValueError("trust_region_shrink_factor must be in (0, 1)")
+        if self.trust_region_expand_factor <= 1.0:
+            raise ValueError("trust_region_expand_factor must be greater than 1")
+        for field_name in (
+            "commit_acquisition_uncertainty_weight",
+            "exploitation_acquisition_uncertainty_weight",
+            "trust_region_support_weight",
+        ):
+            if getattr(self, field_name) < 0.0:
+                raise ValueError(f"{field_name} must be non-negative")
+        if self.commit_surrogate_cross_shrink <= 0.0:
+            raise ValueError("commit_surrogate_cross_shrink must be positive")
+        if self.commit_surrogate_valley_expand <= 0.0:
+            raise ValueError("commit_surrogate_valley_expand must be positive")
+        if self.commit_surrogate_max_condition <= 0.0:
+            raise ValueError("commit_surrogate_max_condition must be positive")
+        for field_name in (
+            "commit_mass_weight",
+            "commit_density_weight",
+            "commit_stability_weight",
+            "commit_objective_weight",
+            "commit_area_penalty",
+        ):
+            if getattr(self, field_name) < 0.0:
+                raise ValueError(f"{field_name} must be non-negative")

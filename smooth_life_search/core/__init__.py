@@ -3,7 +3,6 @@
 from .bounds import BoundsLike, bounds_area, normalize_bounds_2d, point_in_bounds
 from .models import Basin, Bounds2D, Objective, SearchResult, SearchRun, SearchRunner, SmoothLifeSnapshot, ZoomEvent
 from .scheduling import (
-    AGSLS_PER_DECISION_FIELDS,
     KERNEL_PARAMETER_FIELDS,
     RUN_CONSTANT_FIELDS,
     SMOOTHLIFE_PER_STEP_FIELDS,
@@ -14,12 +13,10 @@ from .scheduling import (
     build_ema_alpha_ramp_policy,
     build_gamma_ramp_policy,
     build_kernel_shrink_policy,
-    build_time_phased_policy,
     combine_schedule_policies,
 )
 
 __all__ = [
-    "AGSLS_PER_DECISION_FIELDS",
     "Basin",
     "Bounds2D",
     "BoundsLike",
@@ -40,7 +37,6 @@ __all__ = [
     "build_ema_alpha_ramp_policy",
     "build_gamma_ramp_policy",
     "build_kernel_shrink_policy",
-    "build_time_phased_policy",
     "combine_schedule_policies",
     "normalize_bounds_2d",
     "point_in_bounds",

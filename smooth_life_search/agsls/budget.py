@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import math
-
 from ..smoothlife.state import SmoothLifeState
-from .config import AGSLSConfig
 
 
 def evaluation_limit(configured_limit: int | None, active_limit: int | None) -> int | None:
@@ -36,14 +33,3 @@ def bounded_evaluation_batch(requested: int, remaining: int | None) -> int:
     if remaining is None:
         return int(requested)
     return max(0, min(int(requested), int(remaining)))
-
-
-def effective_zoom_limit(eval_limit: int | None, configured_limit: int, config: AGSLSConfig) -> int:
-    """Scale zoom cycles upward for budgets above the configured baseline."""
-
-    baseline = config.zoom_cycles_budget_baseline
-    if eval_limit is None or baseline is None or baseline <= 0 or eval_limit < baseline:
-        return int(configured_limit)
-    ratio = float(eval_limit) / float(baseline)
-    increment = int(math.floor(math.log2(ratio)))
-    return int(configured_limit) + max(0, increment)

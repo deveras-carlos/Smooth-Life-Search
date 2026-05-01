@@ -26,9 +26,14 @@ def support_field(snapshot: SmoothLifeSnapshot) -> np.ndarray:
 
 
 def _plot_transform(values: np.ndarray) -> np.ndarray:
-    if np.all(values >= 0.0):
-        return np.log1p(values)
-    return np.sign(values) * np.log1p(np.abs(values))
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return np.zeros_like(values, dtype=float)
+    fill = float(finite_values[0])
+    cleaned = np.where(np.isfinite(values), values, fill)
+    if np.all(cleaned >= 0.0):
+        return np.log1p(cleaned)
+    return np.sign(cleaned) * np.log1p(np.abs(cleaned))
 
 
 def convergence_panel(run: SearchRun | None, frame_index: int, panel_size: tuple[int, int]) -> Image.Image:

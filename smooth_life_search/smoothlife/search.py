@@ -24,13 +24,14 @@ from .dynamics import (
     exploration_score_field,
     initial_field,
     laplacian,
+    objective_drift_field,
     refresh_dynamics_fields,
     vitality,
 )
 from .evaluation import (
     blank_objective_cache,
     evaluation_points,
-    normalized_objective_field,
+    guided_objective_field,
     subpixel_best_offset,
     top_evaluated_flat_indices,
 )
@@ -78,14 +79,16 @@ class SmoothLifeSearch:
         return -np.inf if self.config.maximize else np.inf
 
     def _is_better( self, candidate_value: float, incumbent_value: float ) -> bool:
+        tolerance = float( self.config.best_improvement_tolerance )
         if self.config.maximize:
-            return candidate_value > incumbent_value + 1e-12
-        return candidate_value < incumbent_value - 1e-12
+            return candidate_value > incumbent_value + tolerance
+        return candidate_value < incumbent_value - tolerance
 
     def _is_better_or_equal( self, candidate_value: float, incumbent_value: float ) -> bool:
+        tolerance = float( self.config.best_improvement_tolerance )
         if self.config.maximize:
-            return candidate_value >= incumbent_value - 1e-12
-        return candidate_value <= incumbent_value + 1e-12
+            return candidate_value >= incumbent_value - tolerance
+        return candidate_value <= incumbent_value + tolerance
 
     def _initial_field( self ) -> np.ndarray:
         return initial_field( self.config, self.rng )
@@ -255,8 +258,8 @@ class SmoothLifeSearch:
             max_zoom_cycles=int( self.max_zoom_cycles ),
         )
 
-    def apply_runtime_overrides( self, overrides: dict[ str, float | int ], *, rebuild_kernels: bool ) -> dict[ str, float | int ]:
-        changed: dict[ str, float | int ] = { }
+    def apply_runtime_overrides( self, overrides: dict[ str, object ], *, rebuild_kernels: bool ) -> dict[ str, object ]:
+        changed: dict[ str, object ] = { }
         if not overrides:
             return changed
         for field_name, value in overrides.items():
@@ -272,15 +275,23 @@ class SmoothLifeSearch:
         self.config.__post_init__()
         if rebuild_kernels and any( field_name in KERNEL_PARAMETER_FIELDS for field_name in changed ):
             self._rebuild_kernels()
+        objective_field_keys = {
+            "objective_gamma",
+            "objective_guidance_mode",
+            "objective_rbf_top_k",
+            "objective_rbf_sigma",
+            "objective_rbf_temperature",
+            "objective_uncertainty_weight",
+        }
         if self.state is not None:
-            if "objective_gamma" in changed:
+            if objective_field_keys & changed.keys():
                 self._refresh_objective_field()
             self._refresh_dynamics_fields()
             if "support_ema_alpha" in changed:
                 self._reset_support_ema()
         return changed
 
-    def apply_runtime_policy( self, allowed_fields: set[ str ] | frozenset[ str ], *, rebuild_kernels: bool ) -> dict[ str, float | int ]:
+    def apply_runtime_policy( self, allowed_fields: set[ str ] | frozenset[ str ], *, rebuild_kernels: bool ) -> dict[ str, object ]:
         if self.runtime_policy is None:
             return { }
         overrides = self.runtime_policy.resolve( self.runtime_signals(), allowed_fields )
@@ -301,11 +312,16 @@ class SmoothLifeSearch:
 
     def _refresh_objective_field( self ) -> None:
         state = self._require_state()
-        state.objective_field = normalized_objective_field(
+        state.objective_field = guided_objective_field(
             state.objective_values,
             state.evaluated_mask,
             maximize=self.config.maximize,
             gamma=self.config.objective_gamma,
+            mode=self.config.objective_guidance_mode,
+            rbf_top_k=self.config.objective_rbf_top_k,
+            rbf_sigma=self.config.objective_rbf_sigma,
+            rbf_temperature=self.config.objective_rbf_temperature,
+            uncertainty_weight=self.config.objective_uncertainty_weight,
         )
 
     def _update_best_records( self ) -> None:
@@ -498,7 +514,11 @@ class SmoothLifeSearch:
                 updated = state.field + self.config.dt * ( target_state - state.field ) + self.config.diffusion * laplacian
             else:
                 updated = ( 1.0 - self.config.dt ) * state.field + self.config.dt * target_state + self.config.diffusion * laplacian
-            state.field = np.clip( updated, self.config.field_floor, self.config.field_ceiling )
+            state.field = objective_drift_field(
+                np.clip( updated, self.config.field_floor, self.config.field_ceiling ),
+                state.objective_field,
+                self.config,
+            )
             state.step_index += 1
             self._refresh_dynamics_fields()
             self.explore_top_pixels( self.config.evaluations_per_step )

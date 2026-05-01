@@ -12,21 +12,12 @@ from typing import Any
 from .. import (
     AGSLSConfig,
     AdaptiveGridSmoothLifeSearch,
-    ExploitationStudySpec,
-    SchedulePolicy,
     SmoothLifeConfig,
     SmoothLifeSearch,
-    StudySpec,
-    build_gamma_ramp_policy,
-    build_kernel_shrink_policy,
-    build_time_phased_policy,
-    combine_schedule_policies,
     open_run_viewer,
-    run_exploitation_study,
     run_seeded_trials,
     save_run_animation,
     summarize_results,
-    run_tuning_study,
 )
 from ..benchmark import DEFAULT_BOUNDS, OBJECTIVES, ObjectiveFn
 from .config import load_config_file
@@ -50,67 +41,91 @@ def _build_bounds(objective_name: str | None, dimension: int, lower: float | Non
 
 def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]], SmoothLifeConfig, AGSLSConfig]:
     bounds = _build_bounds(args.objective, args.dimension, args.lower, args.upper)
+    smooth_defaults = SmoothLifeConfig()
+    agsls_defaults = AGSLSConfig()
     smoothlife = SmoothLifeConfig(
         grid_shape=(args.grid_height, args.grid_width),
         dt=args.dt,
         diffusion=args.diffusion,
         objective_coupling=args.objective_coupling,
-        objective_gamma=getattr(args, "objective_gamma", 1.0),
+        objective_gamma=args.objective_gamma,
+        best_improvement_tolerance=args.best_improvement_tolerance,
+        objective_guidance_mode=getattr(args, "objective_guidance_mode", smooth_defaults.objective_guidance_mode),
+        objective_rbf_top_k=getattr(args, "objective_rbf_top_k", smooth_defaults.objective_rbf_top_k),
+        objective_rbf_sigma=getattr(args, "objective_rbf_sigma", smooth_defaults.objective_rbf_sigma),
+        objective_rbf_temperature=getattr(args, "objective_rbf_temperature", smooth_defaults.objective_rbf_temperature),
+        objective_uncertainty_weight=getattr(args, "objective_uncertainty_weight", smooth_defaults.objective_uncertainty_weight),
+        objective_drift_strength=getattr(args, "objective_drift_strength", smooth_defaults.objective_drift_strength),
+        objective_drift_clip=getattr(args, "objective_drift_clip", smooth_defaults.objective_drift_clip),
         run_mode="simulation" if args.command == "simulate" else "search",
         preset=args.preset,
         maximize=args.maximize,
     )
     agsls = AGSLSConfig(
-        max_zoom_cycles=getattr(args, "zoom_cycles", 5),
-        initial_steps_per_zoom=getattr(args, "steps_per_zoom", 32),
-        min_steps_per_zoom=getattr(args, "min_steps_per_zoom", 8),
-        zoom_decay=getattr(args, "zoom_decay", 0.75),
         max_evaluations=args.budget,
-        final_polish_enabled=getattr(args, "final_polish_enabled", True),
-        final_polish_max_evaluations=getattr(args, "final_polish_evaluations", 512),
-        inter_zoom_polish_enabled=getattr(args, "inter_zoom_polish_enabled", True),
-        inter_zoom_polish_max_evaluations=getattr(args, "inter_zoom_polish_evaluations", 64),
-        time_phased_enabled=getattr(args, "preset", None) == "time_phased",
+        max_zoom_cycles=getattr(args, "zoom_cycles", agsls_defaults.max_zoom_cycles),
+        exploration_fraction=getattr(args, "exploration_fraction", agsls_defaults.exploration_fraction),
+        commit_fraction=getattr(args, "commit_fraction", agsls_defaults.commit_fraction),
+        exploration_steps_per_tick=getattr(args, "exploration_steps", agsls_defaults.exploration_steps_per_tick),
+        commit_steps_per_zoom=getattr(args, "commit_steps", agsls_defaults.commit_steps_per_zoom),
+        exploitation_steps_per_zoom=getattr(args, "exploitation_steps", agsls_defaults.exploitation_steps_per_zoom),
+        basin_quantile=getattr(args, "basin_quantile", agsls_defaults.basin_quantile),
+        min_basin_cells=getattr(args, "min_basin_cells", agsls_defaults.min_basin_cells),
+        min_alive_density=getattr(args, "min_alive_density", agsls_defaults.min_alive_density),
+        commit_min_shrink_fraction=getattr(args, "commit_min_shrink_fraction", agsls_defaults.commit_min_shrink_fraction),
+        commit_min_explored_fraction=getattr(args, "commit_min_explored_fraction", agsls_defaults.commit_min_explored_fraction),
+        exploitation_shrink_fraction=getattr(args, "exploitation_shrink_fraction", agsls_defaults.exploitation_shrink_fraction),
+        commit_guidance_top_k=getattr(args, "commit_guidance_top_k", agsls_defaults.commit_guidance_top_k),
+        commit_guidance_sigma=getattr(args, "commit_guidance_sigma", agsls_defaults.commit_guidance_sigma),
+        commit_guidance_temperature=getattr(args, "commit_guidance_temperature", agsls_defaults.commit_guidance_temperature),
+        commit_uncertainty_weight=getattr(args, "commit_uncertainty_weight", agsls_defaults.commit_uncertainty_weight),
+        commit_drift_strength=getattr(args, "commit_drift_strength", agsls_defaults.commit_drift_strength),
+        exploitation_guidance_top_k=getattr(args, "exploitation_guidance_top_k", agsls_defaults.exploitation_guidance_top_k),
+        exploitation_guidance_sigma=getattr(args, "exploitation_guidance_sigma", agsls_defaults.exploitation_guidance_sigma),
+        exploitation_guidance_temperature=getattr(args, "exploitation_guidance_temperature", agsls_defaults.exploitation_guidance_temperature),
+        exploitation_uncertainty_weight=getattr(args, "exploitation_uncertainty_weight", agsls_defaults.exploitation_uncertainty_weight),
+        exploitation_drift_strength=getattr(args, "exploitation_drift_strength", agsls_defaults.exploitation_drift_strength),
+        commit_surrogate_enabled=getattr(args, "commit_surrogate_enabled", agsls_defaults.commit_surrogate_enabled),
+        commit_surrogate_min_samples=getattr(args, "commit_surrogate_min_samples", agsls_defaults.commit_surrogate_min_samples),
+        commit_surrogate_max_samples=getattr(args, "commit_surrogate_max_samples", agsls_defaults.commit_surrogate_max_samples),
+        trust_region_enabled=getattr(args, "trust_region_enabled", agsls_defaults.trust_region_enabled),
+        commit_trust_region_evaluations=getattr(
+            args,
+            "commit_trust_region_evaluations",
+            agsls_defaults.commit_trust_region_evaluations,
+        ),
+        exploitation_trust_region_evaluations=getattr(
+            args,
+            "exploitation_trust_region_evaluations",
+            agsls_defaults.exploitation_trust_region_evaluations,
+        ),
+        trust_region_candidate_pool_size=getattr(
+            args,
+            "trust_region_candidate_pool_size",
+            agsls_defaults.trust_region_candidate_pool_size,
+        ),
+        trust_region_initial_radius_fraction=getattr(
+            args,
+            "trust_region_initial_radius_fraction",
+            agsls_defaults.trust_region_initial_radius_fraction,
+        ),
+        exploitation_valley_tracking_enabled=getattr(
+            args,
+            "exploitation_valley_tracking_enabled",
+            agsls_defaults.exploitation_valley_tracking_enabled,
+        ),
+        exploitation_valley_probe_evaluations=getattr(
+            args,
+            "exploitation_valley_probe_evaluations",
+            agsls_defaults.exploitation_valley_probe_evaluations,
+        ),
+        exploitation_valley_step_fraction=getattr(
+            args,
+            "exploitation_valley_step_fraction",
+            agsls_defaults.exploitation_valley_step_fraction,
+        ),
     )
     return bounds, smoothlife, agsls
-
-
-def _maybe_build_kernel_policy(args: argparse.Namespace, smoothlife: SmoothLifeConfig) -> SchedulePolicy | None:
-    if not getattr(args, "shrink_kernels", False):
-        return None
-    end_scale = float(getattr(args, "kernel_shrink_end_scale", 0.6))
-    return build_kernel_shrink_policy(
-        inner_radius=smoothlife.inner_radius,
-        outer_radius=smoothlife.outer_radius,
-        end_scale=end_scale,
-        anti_alias_radius=smoothlife.anti_alias_radius,
-    )
-
-
-def _maybe_build_gamma_policy(args: argparse.Namespace) -> SchedulePolicy | None:
-    gamma_end = getattr(args, "gamma_ramp", None)
-    if gamma_end is None:
-        return None
-    activation = float(getattr(args, "gamma_ramp_activation", 0.3))
-    return build_gamma_ramp_policy(end=float(gamma_end), activation_zoom_fraction=activation)
-
-
-def _maybe_build_time_phased_policy(args: argparse.Namespace, smoothlife: SmoothLifeConfig) -> SchedulePolicy | None:
-    if getattr(args, "preset", None) != "time_phased":
-        return None
-    return build_time_phased_policy(
-        inner_radius=smoothlife.inner_radius,
-        outer_radius=smoothlife.outer_radius,
-        anti_alias_radius=smoothlife.anti_alias_radius,
-    )
-
-
-def _runtime_policy_from_args(args: argparse.Namespace, smoothlife: SmoothLifeConfig) -> SchedulePolicy | None:
-    return combine_schedule_policies(
-        _maybe_build_time_phased_policy(args, smoothlife),
-        _maybe_build_gamma_policy(args),
-        _maybe_build_kernel_policy(args, smoothlife),
-    )
 
 
 def _objective_from_args(args: argparse.Namespace) -> ObjectiveFn:
@@ -125,6 +140,7 @@ def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
         "bounds": snapshot.bounds.tolist(),
         "best_point": snapshot.best_point.tolist(),
         "best_value": snapshot.best_value,
+        "metadata": dict(snapshot.metadata),
     }
 
 
@@ -138,7 +154,7 @@ def _zoom_payload(run: Any) -> list[dict[str, Any]]:
             "selected_basin_score": event.selected_basin_score,
             "selected_basin_bbox": event.selected_basin_bbox.tolist(),
             "evaluation_count": event.evaluation_count,
-            "diagnostics": dict( getattr( event, "diagnostics", {} ) ),
+            "diagnostics": dict(event.diagnostics),
         }
         for event in run.zoom_events
     ]
@@ -183,8 +199,7 @@ def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
 def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
     bounds, smoothlife, agsls = _build_configs(args)
-    runtime_policy = _runtime_policy_from_args(args, smoothlife)
-    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls, runtime_policy=runtime_policy)
+    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls)
     controller.reset(seed=args.seed)
     run = controller.run(zoom_cycles=args.zoom_cycles, evaluations=args.budget)
     run.metadata.update({"mode": "agsls", "objective": args.objective})
@@ -201,39 +216,16 @@ def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
         "best_point": run.best_point.tolist(),
         "bounds": run.bounds.tolist(),
         "zoom_events": _zoom_payload(run),
+        "phase_counts": run.metadata.get("phase_counts", {}),
+        "decision_trace": run.metadata.get("decision_trace", []),
+        "trust_region_events": run.metadata.get("trust_region_events", []),
         "snapshots": [_snapshot_payload(snapshot) for snapshot in run.snapshots],
-        "final_polish": run.metadata.get("final_polish"),
-        "inter_zoom_polish_history": run.metadata.get("inter_zoom_polish_history") or [],
         "gif_path": gif_path,
     }
 
 
 def run_single(args: argparse.Namespace) -> dict[str, Any]:
-    objective = _objective_from_args(args)
-    bounds, smoothlife, agsls = _build_configs(args)
-    runtime_policy = _runtime_policy_from_args(args, smoothlife)
-    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls, runtime_policy=runtime_policy)
-    controller.reset(seed=args.seed)
-    result = controller.run(zoom_cycles=args.zoom_cycles, evaluations=args.budget)
-    result.metadata.update({"mode": "single", "objective": args.objective})
-    gif_path = _maybe_write_animation(result, args.gif)
-    _maybe_show_animation(result, args.show, title="Single Run")
-    return {
-        "mode": "single",
-        "objective": args.objective,
-        "dimension": args.dimension,
-        "seed": args.seed,
-        "budget": args.budget,
-        "maximize": args.maximize,
-        "evaluations": result.evaluations,
-        "best_value": result.best_value,
-        "best_point": result.best_point.tolist(),
-        "bounds": result.bounds.tolist(),
-        "zoom_events": _zoom_payload(result),
-        "final_polish": result.metadata.get("final_polish"),
-        "inter_zoom_polish_history": result.metadata.get("inter_zoom_polish_history") or [],
-        "gif_path": gif_path,
-    }
+    return run_agsls_command(args) | {"mode": "single"}
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
@@ -241,7 +233,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     bounds, smoothlife, agsls = _build_configs(args)
     seeds = list(range(args.seed_start, args.seed_start + args.trials))
 
-    def search_factory(seed: int) -> AdaptiveGridSmoothLifeSearch:
+    def search_factory(_seed: int) -> AdaptiveGridSmoothLifeSearch:
         return AdaptiveGridSmoothLifeSearch(
             objective,
             bounds,
@@ -276,13 +268,15 @@ def _print_single(payload: dict[str, Any], show_stages: bool) -> None:
     print(f"evaluations: {payload['evaluations']}")
     print(f"best value: {payload['best_value']:e}")
     print(f"best point: {payload['best_point']}")
+    print(f"phase counts: {payload['phase_counts']}")
     if show_stages:
         print("zoom events:")
         for event in payload["zoom_events"]:
+            diagnostics = event["diagnostics"]
             print(
                 "  "
-                f"zoom={event['zoom_index']} steps={event['steps_per_zoom']} "
-                f"score={event['selected_basin_score']:.4f} bounds={event['new_bounds']}"
+                f"zoom={event['zoom_index']} phase={diagnostics.get('phase')} "
+                f"reason={diagnostics.get('zoom_reason')} bounds={event['new_bounds']}"
             )
     if payload["gif_path"] is not None:
         print(f"gif: {payload['gif_path']}")
@@ -310,157 +304,10 @@ def _print_benchmark(payload: dict[str, Any]) -> None:
     print(f"success rate: {payload['success_rate']:.4f}")
 
 
-def _parse_csv_list(raw: str, *, cast: type = str) -> tuple[Any, ...]:
-    values = [item.strip() for item in raw.split(",") if item.strip()]
-    if not values:
-        raise ValueError("expected at least one comma-separated value")
-    return tuple(cast(item) for item in values)
-
-
-def _parse_grid(raw: str) -> tuple[int, int]:
-    lowered = raw.lower().replace("x", ",")
-    parts = [part.strip() for part in lowered.split(",") if part.strip()]
-    if len(parts) != 2:
-        raise ValueError("grid sizes must look like HEIGHTxWIDTH")
-    return int(parts[0]), int(parts[1])
-
-
-def _build_tune_spec(args: argparse.Namespace) -> StudySpec:
-    return StudySpec(
-        output_dir=Path(args.output_dir),
-        objectives=tuple(_parse_csv_list(args.objectives)),
-        baseline_budgets=tuple(_parse_csv_list(args.baseline_budgets, cast=int)),
-        static_budgets=tuple(_parse_csv_list(args.static_budgets, cast=int)),
-        adaptive_screen_budgets=tuple(_parse_csv_list(args.adaptive_screen_budgets, cast=int)),
-        adaptive_confirmation_budgets=tuple(_parse_csv_list(args.adaptive_confirmation_budgets, cast=int)),
-        interaction_budgets=tuple(_parse_csv_list(args.interaction_budgets, cast=int)),
-        final_confirmation_budgets=tuple(_parse_csv_list(args.final_confirmation_budgets, cast=int)),
-        seed_start=int(args.seed_start),
-        stage1_seeds=int(args.stage1_seeds),
-        stage2_seeds=int(args.stage2_seeds),
-        stage3_seeds=int(args.stage3_seeds),
-        stage4_seeds=int(args.stage4_seeds),
-        stage5_seeds=int(args.stage5_seeds),
-        stage6_seeds=int(args.stage6_seeds),
-        stage1_grid_shape=_parse_grid(args.screen_grid),
-        intermediate_grid_shape=_parse_grid(args.screen_grid),
-        final_grid_shape=_parse_grid(args.final_grid),
-        interaction_top_k=int(args.interaction_top_k),
-        finalist_limit=int(args.finalist_limit),
-        workers=None if args.workers is None else int(args.workers),
-        resume=not bool(args.no_resume),
-        keep_snapshots_in_finalists=bool(args.keep_finalist_snapshots),
-        parameter_families=None if not args.parameter_families else tuple(_parse_csv_list(args.parameter_families)),
-        profile=str(args.profile),
-        strict_adaptive_rule=bool(args.strict_adaptive_rule),
-        preflight=not bool(args.no_preflight),
-    )
-
-
-def _build_exploit_spec(args: argparse.Namespace) -> ExploitationStudySpec:
-    return ExploitationStudySpec(
-        output_dir=Path(args.output_dir),
-        objectives=tuple(_parse_csv_list(args.objectives)),
-        static_budgets=tuple(_parse_csv_list(args.static_budgets, cast=int)),
-        adaptive_screen_budgets=tuple(_parse_csv_list(args.adaptive_screen_budgets, cast=int)),
-        confirmation_budgets=tuple(_parse_csv_list(args.confirmation_budgets, cast=int)),
-        seed_start=int(args.seed_start),
-        stage1_seeds=int(args.stage1_seeds),
-        stage2_seeds=int(args.stage2_seeds),
-        stage3_seeds=int(args.stage3_seeds),
-        grid_shape=_parse_grid(args.grid),
-        workers=None if args.workers is None else int(args.workers),
-        resume=not bool(args.no_resume),
-        parameter_families=tuple(_parse_csv_list(args.parameter_families)) if args.parameter_families else (
-            "diffusion",
-            "objective_guidance",
-            "evaluation_batch",
-            "basin_quantile",
-            "zoom_padding",
-            "probe_budget",
-            "decision_margins",
-        ),
-        preflight=not bool(args.no_preflight),
-    )
-
-
-def run_tune(args: argparse.Namespace) -> dict[str, Any]:
-    summary = run_tuning_study(_build_tune_spec(args))
-    return {
-        "mode": "tune",
-        "output_dir": str(summary.output_dir),
-        "total_trials": summary.total_trials,
-        "completed_trials": summary.completed_trials,
-        "skipped_trials": summary.skipped_trials,
-        "trials_path": str(summary.trials_path),
-        "per_objective_leaderboard_path": str(summary.per_objective_leaderboard_path),
-        "overall_rank_path": str(summary.overall_rank_path),
-        "parameter_effects_path": str(summary.parameter_effects_path),
-        "adaptive_required_path": str(summary.adaptive_required_path),
-        "adaptive_paired_effects_path": str(summary.adaptive_paired_effects_path),
-        "runtime_efficiency_path": str(summary.runtime_efficiency_path),
-        "family_manifest_path": str(summary.family_manifest_path),
-        "finalists_path": str(summary.finalists_path),
-        "report_path": str(summary.report_path),
-    }
-
-
-def run_exploit(args: argparse.Namespace) -> dict[str, Any]:
-    summary = run_exploitation_study(_build_exploit_spec(args))
-    return {
-        "mode": "exploit",
-        "output_dir": str(summary.output_dir),
-        "total_trials": summary.total_trials,
-        "completed_trials": summary.completed_trials,
-        "skipped_trials": summary.skipped_trials,
-        "trials_path": str(summary.trials_path),
-        "decision_trace_path": str(summary.decision_trace_path),
-        "zoom_trace_path": str(summary.zoom_trace_path),
-        "per_objective_leaderboard_path": str(summary.per_objective_leaderboard_path),
-        "exploitation_metrics_path": str(summary.exploitation_metrics_path),
-        "adaptive_exploitation_path": str(summary.adaptive_exploitation_path),
-        "decision_phase_effects_path": str(summary.decision_phase_effects_path),
-        "family_manifest_path": str(summary.family_manifest_path),
-        "report_path": str(summary.report_path),
-    }
-
-
-def _print_tune(payload: dict[str, Any]) -> None:
-    print(f"output dir: {payload['output_dir']}")
-    print(f"total trials: {payload['total_trials']}")
-    print(f"completed this run: {payload['completed_trials']}")
-    print(f"skipped from resume: {payload['skipped_trials']}")
-    print(f"trials: {payload['trials_path']}")
-    print(f"per-objective leaderboard: {payload['per_objective_leaderboard_path']}")
-    print(f"overall rank: {payload['overall_rank_path']}")
-    print(f"parameter effects: {payload['parameter_effects_path']}")
-    print(f"adaptive required: {payload['adaptive_required_path']}")
-    print(f"adaptive paired effects: {payload['adaptive_paired_effects_path']}")
-    print(f"runtime efficiency: {payload['runtime_efficiency_path']}")
-    print(f"family manifest: {payload['family_manifest_path']}")
-    print(f"finalists: {payload['finalists_path']}")
-    print(f"report: {payload['report_path']}")
-
-
-def _print_exploit(payload: dict[str, Any]) -> None:
-    print(f"output dir: {payload['output_dir']}")
-    print(f"total trials: {payload['total_trials']}")
-    print(f"completed this run: {payload['completed_trials']}")
-    print(f"skipped from resume: {payload['skipped_trials']}")
-    print(f"trials: {payload['trials_path']}")
-    print(f"decision trace: {payload['decision_trace_path']}")
-    print(f"zoom trace: {payload['zoom_trace_path']}")
-    print(f"per-objective leaderboard: {payload['per_objective_leaderboard_path']}")
-    print(f"exploitation metrics: {payload['exploitation_metrics_path']}")
-    print(f"adaptive exploitation: {payload['adaptive_exploitation_path']}")
-    print(f"decision phase effects: {payload['decision_phase_effects_path']}")
-    print(f"family manifest: {payload['family_manifest_path']}")
-    print(f"report: {payload['report_path']}")
-
-
 def build_parser() -> argparse.ArgumentParser:
+    agsls_defaults = AGSLSConfig()
     parser = argparse.ArgumentParser(
-        description="Run SmoothLife simulation and Adaptive Grid Smooth Life Search jobs.",
+        description="Run SmoothLife simulation and three-phase AGSLS jobs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", type=str, default=None, help="Optional JSON/TOML file providing parser defaults.")
@@ -479,24 +326,46 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("--dt", type=float, default=0.25, help="SmoothLife time-step.")
     shared.add_argument("--diffusion", type=float, default=0.10, help="Diffusion strength.")
     shared.add_argument("--objective-coupling", type=float, default=0.30, help="How strongly the objective affects the transition function.")
-    shared.add_argument("--objective-gamma", type=float, default=1.0, help="Exponent applied to the normalized objective field. Values > 1 sharpen the support field toward the top of the distribution, favouring exploitation.")
+    shared.add_argument("--objective-gamma", type=float, default=1.0, help="Exponent applied to normalized objective values.")
+    shared.add_argument("--best-improvement-tolerance", type=float, default=0.0, help="Minimum objective improvement required to update the best record.")
     shared.add_argument("--preset", type=str, default="search", help="SmoothLife preset name.")
     shared.add_argument("--gif", type=str, default=None, help="Optional GIF output path.")
     shared.add_argument("--show", action="store_true", help="Open the animation in a Tk GUI viewer after the run completes.")
 
     agsls_shared = argparse.ArgumentParser(add_help=False)
-    agsls_shared.add_argument("--zoom-cycles", type=int, default=5, help="Maximum number of zoom cycles.")
-    agsls_shared.add_argument("--steps-per-zoom", type=int, default=32, help="Initial SmoothLife steps per zoom cycle.")
-    agsls_shared.add_argument("--min-steps-per-zoom", type=int, default=8, help="Minimum SmoothLife steps per zoom cycle.")
-    agsls_shared.add_argument("--zoom-decay", type=float, default=0.75, help="Decay factor that makes zooms more frequent over time.")
-    agsls_shared.add_argument("--shrink-kernels", action="store_true", help="Linearly shrink SmoothLife kernel radii across zoom cycles for exploitation-favoured dynamics.")
-    agsls_shared.add_argument("--kernel-shrink-end-scale", type=float, default=0.6, help="End-of-run scale applied to inner/outer kernel radii when --shrink-kernels is set.")
-    agsls_shared.add_argument("--gamma-ramp", type=float, default=None, metavar="END", help="Ramp SmoothLife objective_gamma from 1.0 to END over late zoom progress.")
-    agsls_shared.add_argument("--gamma-ramp-activation", type=float, default=0.3, help="Zoom fraction where --gamma-ramp begins.")
-    agsls_shared.add_argument("--no-final-polish", dest="final_polish_enabled", action="store_false", default=True, help="Disable the bounded final local polish phase.")
-    agsls_shared.add_argument("--final-polish-evaluations", type=int, default=512, help="Maximum objective evaluations for final local polish.")
-    agsls_shared.add_argument("--no-inter-zoom-polish", dest="inter_zoom_polish_enabled", action="store_false", default=True, help="Disable the inter-zoom bounded polish that runs after each accepted zoom.")
-    agsls_shared.add_argument("--inter-zoom-polish-evaluations", type=int, default=64, help="Maximum objective evaluations per inter-zoom local polish.")
+    agsls_shared.add_argument("--zoom-cycles", type=int, default=agsls_defaults.max_zoom_cycles, help="Maximum number of AGSLS zooms.")
+    agsls_shared.add_argument("--exploration-fraction", type=float, default=agsls_defaults.exploration_fraction, help="Budget fraction spent with SmoothLife only.")
+    agsls_shared.add_argument("--commit-fraction", type=float, default=agsls_defaults.commit_fraction, help="Budget fraction where commit ends and exploitation begins.")
+    agsls_shared.add_argument("--exploration-steps", type=int, default=agsls_defaults.exploration_steps_per_tick, help="SmoothLife steps per exploration tick.")
+    agsls_shared.add_argument("--commit-steps", type=int, default=agsls_defaults.commit_steps_per_zoom, help="SmoothLife steps before each commit zoom.")
+    agsls_shared.add_argument("--exploitation-steps", type=int, default=agsls_defaults.exploitation_steps_per_zoom, help="SmoothLife steps before each exploitation zoom.")
+    agsls_shared.add_argument("--basin-quantile", type=float, default=agsls_defaults.basin_quantile, help="Support-field quantile used to detect basins.")
+    agsls_shared.add_argument("--min-basin-cells", type=int, default=agsls_defaults.min_basin_cells, help="Minimum cells for a basin to be zoom-eligible.")
+    agsls_shared.add_argument("--min-alive-density", type=float, default=agsls_defaults.min_alive_density, help="Minimum alive density for a basin to be zoom-eligible.")
+    agsls_shared.add_argument("--commit-min-shrink-fraction", type=float, default=agsls_defaults.commit_min_shrink_fraction, help="Commit zoom side floor as a fraction of current bounds.")
+    agsls_shared.add_argument("--commit-min-explored-fraction", type=float, default=agsls_defaults.commit_min_explored_fraction, help="Minimum active-box explored fraction before commit can zoom.")
+    agsls_shared.add_argument("--exploitation-shrink-fraction", type=float, default=agsls_defaults.exploitation_shrink_fraction, help="Aggressive exploitation side shrink factor.")
+    agsls_shared.add_argument("--commit-guidance-top-k", type=int, default=agsls_defaults.commit_guidance_top_k, help="Top evaluated samples used for commit RBF guidance.")
+    agsls_shared.add_argument("--commit-guidance-sigma", type=float, default=agsls_defaults.commit_guidance_sigma, help="Commit RBF guidance sigma in normalized box units.")
+    agsls_shared.add_argument("--commit-guidance-temperature", type=float, default=agsls_defaults.commit_guidance_temperature, help="Commit RBF softmax temperature.")
+    agsls_shared.add_argument("--commit-uncertainty-weight", type=float, default=agsls_defaults.commit_uncertainty_weight, help="Commit unevaluated-cell bonus near guided support.")
+    agsls_shared.add_argument("--commit-drift-strength", type=float, default=agsls_defaults.commit_drift_strength, help="Commit objective-gradient drift strength.")
+    agsls_shared.add_argument("--exploitation-guidance-top-k", type=int, default=agsls_defaults.exploitation_guidance_top_k, help="Top evaluated samples used for exploitation RBF guidance.")
+    agsls_shared.add_argument("--exploitation-guidance-sigma", type=float, default=agsls_defaults.exploitation_guidance_sigma, help="Exploitation RBF guidance sigma in normalized box units.")
+    agsls_shared.add_argument("--exploitation-guidance-temperature", type=float, default=agsls_defaults.exploitation_guidance_temperature, help="Exploitation RBF softmax temperature.")
+    agsls_shared.add_argument("--exploitation-uncertainty-weight", type=float, default=agsls_defaults.exploitation_uncertainty_weight, help="Exploitation unevaluated-cell bonus near guided support.")
+    agsls_shared.add_argument("--exploitation-drift-strength", type=float, default=agsls_defaults.exploitation_drift_strength, help="Exploitation objective-gradient drift strength.")
+    agsls_shared.add_argument("--no-commit-surrogate", dest="commit_surrogate_enabled", action="store_false", default=agsls_defaults.commit_surrogate_enabled, help="Disable the commit-phase quadratic surrogate zoom helper.")
+    agsls_shared.add_argument("--commit-surrogate-min-samples", type=int, default=agsls_defaults.commit_surrogate_min_samples, help="Minimum evaluated samples required for commit surrogate fitting.")
+    agsls_shared.add_argument("--commit-surrogate-max-samples", type=int, default=agsls_defaults.commit_surrogate_max_samples, help="Maximum evaluated samples used for commit surrogate fitting.")
+    agsls_shared.add_argument("--no-trust-region", dest="trust_region_enabled", action="store_false", default=agsls_defaults.trust_region_enabled, help="Disable trust-region acquisition batches in commit/exploitation.")
+    agsls_shared.add_argument("--trust-region-commit-evals", dest="commit_trust_region_evaluations", type=int, default=agsls_defaults.commit_trust_region_evaluations, help="Maximum trust-region probes per commit decision.")
+    agsls_shared.add_argument("--trust-region-exploitation-evals", dest="exploitation_trust_region_evaluations", type=int, default=agsls_defaults.exploitation_trust_region_evaluations, help="Maximum trust-region probes per exploitation decision.")
+    agsls_shared.add_argument("--trust-region-candidates", dest="trust_region_candidate_pool_size", type=int, default=agsls_defaults.trust_region_candidate_pool_size, help="Candidate pool size for trust-region acquisition.")
+    agsls_shared.add_argument("--trust-region-initial-radius-fraction", type=float, default=agsls_defaults.trust_region_initial_radius_fraction, help="Initial trust-region radius as a fraction of active bounds.")
+    agsls_shared.add_argument("--no-exploitation-valley-tracking", dest="exploitation_valley_tracking_enabled", action="store_false", default=agsls_defaults.exploitation_valley_tracking_enabled, help="Disable exploitation valley/manifold probe tracking.")
+    agsls_shared.add_argument("--exploitation-valley-probes", dest="exploitation_valley_probe_evaluations", type=int, default=agsls_defaults.exploitation_valley_probe_evaluations, help="Maximum objective probes used for exploitation valley tracking.")
+    agsls_shared.add_argument("--exploitation-valley-step-fraction", type=float, default=agsls_defaults.exploitation_valley_step_fraction, help="Initial normalized step used by exploitation valley tracking.")
 
     single = subparsers.add_parser("single", parents=[shared, agsls_shared], help="Run one AGSLS optimization job.")
     single.add_argument("--show-stages", action="store_true", help="Print per-zoom details.")
@@ -515,53 +384,6 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--success-threshold", type=float, default=0.1, help="Best-value threshold for counting a run as successful.")
     benchmark.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
-    tune = subparsers.add_parser("tune", help="Run the parallel multi-stage tuning study.")
-    tune.add_argument("--output-dir", type=str, default="tuning-output", help="Directory for NDJSON results and derived artifacts.")
-    tune.add_argument("--objectives", type=str, default="sphere,ackley,rastrigin,griewank,rosenbrock,himmelblau", help="Comma-separated objectives.")
-    tune.add_argument("--baseline-budgets", type=str, default="400,800,1600", help="Comma-separated budgets for the baseline stage.")
-    tune.add_argument("--static-budgets", type=str, default="400,800", help="Comma-separated budgets for the static ablation stage.")
-    tune.add_argument("--adaptive-screen-budgets", type=str, default="400,800,1600", help="Comma-separated budgets for adaptive schedule screening.")
-    tune.add_argument("--adaptive-confirmation-budgets", type=str, default="800,1600,3200", help="Comma-separated budgets for adaptive head-to-head confirmation.")
-    tune.add_argument("--interaction-budgets", type=str, default="800,1600", help="Comma-separated budgets for the interaction stage.")
-    tune.add_argument("--final-confirmation-budgets", type=str, default="3200,6400", help="Comma-separated budgets for final confirmation.")
-    tune.add_argument("--screen-grid", type=str, default="64x64", help="Grid shape for stages 1-4 as HEIGHTxWIDTH.")
-    tune.add_argument("--final-grid", type=str, default="128x128", help="Grid shape for final confirmation as HEIGHTxWIDTH.")
-    tune.add_argument("--seed-start", type=int, default=0, help="First seed used in every stage.")
-    tune.add_argument("--stage1-seeds", type=int, default=24, help="Number of paired seeds for the baseline stage.")
-    tune.add_argument("--stage2-seeds", type=int, default=16, help="Number of paired seeds for the static ablation stage.")
-    tune.add_argument("--stage3-seeds", type=int, default=20, help="Number of paired seeds for the adaptive schedule screen.")
-    tune.add_argument("--stage4-seeds", type=int, default=32, help="Number of paired seeds for adaptive confirmation.")
-    tune.add_argument("--stage5-seeds", type=int, default=12, help="Number of paired seeds for the interaction stage.")
-    tune.add_argument("--stage6-seeds", type=int, default=64, help="Number of paired seeds for final confirmation.")
-    tune.add_argument("--interaction-top-k", type=int, default=6, help="How many top families per variant feed the pairwise interaction stage.")
-    tune.add_argument("--finalist-limit", type=int, default=8, help="How many finalists per variant advance to final confirmation.")
-    tune.add_argument("--workers", type=int, default=None, help="Worker process count. Defaults to cpu_count() - 1.")
-    tune.add_argument("--parameter-families", type=str, default=None, help="Optional comma-separated subset of parameter families.")
-    tune.add_argument("--profile", type=str, default="maximal", help="Named tune profile to record in the study metadata.")
-    tune.add_argument("--relaxed-adaptive-rule", dest="strict_adaptive_rule", action="store_false", help="Use the relaxed adaptive classification rule.")
-    tune.set_defaults(strict_adaptive_rule=True)
-    tune.add_argument("--keep-finalist-snapshots", action="store_true", help="Retain full snapshots for final confirmation trials.")
-    tune.add_argument("--no-resume", action="store_true", help="Ignore existing completed trials in the output directory.")
-    tune.add_argument("--no-preflight", action="store_true", help="Skip the serial-vs-parallel smoke preflight check.")
-    tune.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-
-    exploit = subparsers.add_parser("exploit", help="Run the AGSLS exploitation adaptivity study.")
-    exploit.add_argument("--output-dir", type=str, default="exploitation-output", help="Directory for NDJSON results and derived artifacts.")
-    exploit.add_argument("--objectives", type=str, default="sphere,ackley,rastrigin,griewank,rosenbrock,himmelblau", help="Comma-separated objectives.")
-    exploit.add_argument("--static-budgets", type=str, default="400,800", help="Comma-separated budgets for fixed-parameter ablations.")
-    exploit.add_argument("--adaptive-screen-budgets", type=str, default="400,800,1600", help="Comma-separated budgets for adaptive screening.")
-    exploit.add_argument("--confirmation-budgets", type=str, default="400,800,1600", help="Comma-separated budgets for fixed-vs-adaptive confirmation.")
-    exploit.add_argument("--grid", type=str, default="64x64", help="Grid shape for all stages as HEIGHTxWIDTH.")
-    exploit.add_argument("--seed-start", type=int, default=0, help="First seed used in every stage.")
-    exploit.add_argument("--stage1-seeds", type=int, default=12, help="Number of seeds for the fixed-parameter stage.")
-    exploit.add_argument("--stage2-seeds", type=int, default=16, help="Number of seeds for the adaptive screening stage.")
-    exploit.add_argument("--stage3-seeds", type=int, default=20, help="Number of seeds for the confirmation stage.")
-    exploit.add_argument("--workers", type=int, default=None, help="Worker process count. Defaults to cpu_count() - 1.")
-    exploit.add_argument("--parameter-families", type=str, default=None, help="Optional comma-separated subset of exploitation families.")
-    exploit.add_argument("--no-resume", action="store_true", help="Ignore existing completed trials in the output directory.")
-    exploit.add_argument("--no-preflight", action="store_true", help="Skip the serial-vs-parallel smoke preflight check.")
-    exploit.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-
     return parser
 
 
@@ -578,6 +400,12 @@ def main(argv: list[str] | None = None) -> int:
             for token in raw_argv
             if token.startswith("--") and token != "--config"
         }
+        if "no_commit_surrogate" in explicit_dests:
+            explicit_dests.add("commit_surrogate_enabled")
+        if "no_trust_region" in explicit_dests:
+            explicit_dests.add("trust_region_enabled")
+        if "no_exploitation_valley_tracking" in explicit_dests:
+            explicit_dests.add("exploitation_valley_tracking_enabled")
         for key, value in load_config_file(config_args.config).items():
             if key not in explicit_dests:
                 setattr(args, key, value)
@@ -610,26 +438,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _print_benchmark(payload)
             return 0
-        if args.command == "tune":
-            payload = run_tune(args)
-            if args.json:
-                print(json.dumps(payload, indent=2))
-            else:
-                _print_tune(payload)
-            return 0
-        if args.command == "exploit":
-            payload = run_exploit(args)
-            if args.json:
-                print(json.dumps(payload, indent=2))
-            else:
-                _print_exploit(payload)
-            return 0
     except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     return 1
 
 
-__all__ = ["build_parser", "main", "run_agsls_command", "run_benchmark", "run_exploit", "run_simulation", "run_single", "run_tune"]
+__all__ = ["build_parser", "main", "run_agsls_command", "run_benchmark", "run_simulation", "run_single"]
 
 
 if __name__ == "__main__":
