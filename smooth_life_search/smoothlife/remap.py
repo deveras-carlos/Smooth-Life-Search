@@ -1,4 +1,4 @@
-"""Field remapping helpers used when AGSLS zooms into a basin."""
+"""Field remapping helpers for dense SmoothLife views."""
 
 from __future__ import annotations
 

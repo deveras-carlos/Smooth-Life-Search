@@ -1,4 +1,4 @@
-"""Visualization helpers for SmoothLife Search and AGSLS."""
+"""Visualization helpers for SmoothLife simulation and point-cloud search."""
 
 from .animation import save_run_animation
 from .frames import snapshot_to_image

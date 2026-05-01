@@ -1,22 +1,19 @@
 # Smooth-Life-Search
 
-Smooth-Life-Search is a small Python package for 2D SmoothLife-inspired optimization.
+Smooth-Life-Search is a small Python package for 2D SmoothLife-inspired simulation and archive-centered optimization.
 
-- `SmoothLifeSearch` is the dense SmoothLife-style simulator. It keeps the literal field evolution, disk/ring neighborhoods, lazy objective evaluation, objective-aware transition dynamics, and optional guided objective support.
-- `AdaptiveGridSmoothLifeSearch` (`AGSLS`) is a deliberately small controller around that simulator. It runs SmoothLife, detects basins, and zooms the active bounds through three phases.
+- `SmoothLifeSearch` is the literal dense SmoothLife-style simulator. It keeps field evolution, disk/ring neighborhoods, lazy objective evaluation, objective-aware transition dynamics, and optional guided objective support.
+- `PointCloudSmoothLifeSearch` is the optimizer. It keeps a persistent archive of evaluated points, derives temporary SmoothLife-style density views from that archive, and proposes new candidates from global samples, density samples, adaptive trust regions, local quadratic surrogates, and incumbent-centered refinement probes.
 
 ## What It Implements
 
 - Literal 2D SmoothLife-style state evolution with disk and ring neighborhoods.
-- Objective-aware transition dynamics where the optimization landscape can influence the update rule.
-- RBF/softmin objective guidance and mild gradient drift for AGSLS commit/exploitation phases.
-- Trust-region acquisition batches that let SmoothLife propose basins while off-grid probes improve the incumbent before remaps.
-- Exploitation valley tracking remains available as the fallback path when trust-region acquisition is disabled.
-- Three-phase AGSLS:
-  - exploration: SmoothLife runs without zooming and without objective drift.
-  - commit: guided basin support, density, stability, group evidence, and trust-region probes drive conservative remaps.
-  - exploitation: the global best anchors aggressive zooms whenever it is inside the active box, after trust-region acquisition improves or confirms the incumbent.
-- GIF animation export for the whole search trajectory.
+- Objective-aware transition dynamics for dense SmoothLife simulation.
+- Archive-first point-cloud optimization where every objective evaluation is stored once.
+- Adaptive proposal-region portfolios with radius expansion/shrink feedback.
+- Derived SmoothLife-style density grids for candidate proposal and visualization.
+- Quadratic local surrogate candidates and finite-difference local refinement.
+- GIF animation export for simulation and point-cloud search trajectories.
 - Built-in benchmark objectives and repeated seeded benchmark runs.
 - CLI/config/objective ingestion for JSON/TOML config files, Python-callable objectives, and CSV sampled-surface objectives.
 
@@ -46,16 +43,16 @@ smooth-life-search --config run.toml simulate --objective sphere --steps 40
 
 Config values are used as defaults; explicit CLI flags override them.
 
-AGSLS optimization run:
+Point-cloud optimization run:
 
 ```bash
-smooth-life-search agsls --objective ackley --dimension 2 --seed 7 --budget 20000 --zoom-cycles 8 --gif agsls.gif
+smooth-life-search point-cloud --objective ackley --dimension 2 --seed 7 --budget 20000 --gif point-cloud.gif
 ```
 
 Watch the same run in a GUI window:
 
 ```bash
-smooth-life-search agsls --objective ackley --dimension 2 --seed 7 --budget 20000 --zoom-cycles 8 --show
+smooth-life-search point-cloud --objective ackley --dimension 2 --seed 7 --budget 20000 --show
 ```
 
 Literal SmoothLife simulation:
@@ -72,25 +69,25 @@ smooth-life-search benchmark --objective ackley --dimension 2 --trials 20 --budg
 
 Use `--json` on any subcommand for machine-readable output.
 
-Trust-region acquisition is enabled by default for AGSLS. Disable it with `--no-trust-region`, or tune it with `--trust-region-commit-evals`, `--trust-region-exploitation-evals`, `--trust-region-candidates`, and `--trust-region-initial-radius-fraction`.
+Point-cloud trust regions are enabled by default. Disable region candidate batches with `--no-trust-regions`, disable local surrogates with `--no-surrogate`, or tune the portfolio with `--portfolio-size`, `--region-initial-radius-fraction`, `--region-expand-factor`, and `--region-shrink-factor`.
 
-Disable the fallback exploitation valley tracking with `--no-exploitation-valley-tracking`, or tune it with `--exploitation-valley-probes` and `--exploitation-valley-step-fraction`.
+Disable finite-difference incumbent refinement with `--no-local-refinement`, or tune it with `--local-refinement-start-evaluations`, `--local-refinement-max-evaluations`, and `--local-refinement-step-fraction`.
 
 ## Quick Start From Python
 
 ```python
 from smooth_life_search import (
-    AGSLSConfig,
-    AdaptiveGridSmoothLifeSearch,
+    PointCloudSearchConfig,
+    PointCloudSmoothLifeSearch,
     SmoothLifeConfig,
     ackley,
 )
 
-search = AdaptiveGridSmoothLifeSearch(
+search = PointCloudSmoothLifeSearch(
     objective=ackley,
     bounds=[(-10.0, 10.0), (-10.0, 10.0)],
     smoothlife_config=SmoothLifeConfig(preset="search"),
-    agsls_config=AGSLSConfig(max_evaluations=20_000, max_zoom_cycles=8),
+    point_cloud_config=PointCloudSearchConfig(max_evaluations=20_000),
 )
 search.reset(seed=7)
 run = search.run()
@@ -100,8 +97,8 @@ print(run.best_point)
 
 Package-level modules are organized by responsibility:
 
-- `smooth_life_search.smoothlife`: literal SmoothLife search engine.
-- `smooth_life_search.agsls`: three-phase adaptive grid SmoothLife search.
+- `smooth_life_search.smoothlife`: literal SmoothLife simulator.
+- `smooth_life_search.point_cloud`: archive-centered point-cloud optimizer.
 - `smooth_life_search.benchmark`: objective registry and seeded trials.
 - `smooth_life_search.visualization`: frame rendering, GIF export, and Tk viewer.
 - `smooth_life_search.input`: CLI/config/objective ingestion.
@@ -128,7 +125,7 @@ python -m unittest discover -s tests -v
 
 ## Notes
 
-- The current implementation is intentionally **2D only**.
-- AGSLS runs require an objective evaluation budget, either in `AGSLSConfig(max_evaluations=...)` or `run(evaluations=...)`.
+- The shipped optimizer and visualization are intentionally **2D stable**.
+- Point-cloud optimization runs require an objective evaluation budget, either in `PointCloudSearchConfig(max_evaluations=...)` or `run(evaluations=...)`.
 - For maximization, set `maximize=True` in `SmoothLifeConfig`.
 - The convenience public API lives in `smooth_life_search/__init__.py`; subsystem APIs live in their package `__init__.py` files.

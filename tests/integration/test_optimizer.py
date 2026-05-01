@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-import numpy as np
-
-from smooth_life_search import AGSLSConfig, AdaptiveGridSmoothLifeSearch, SmoothLifeConfig, sphere
+from smooth_life_search import PointCloudSearchConfig, PointCloudSmoothLifeSearch, SmoothLifeConfig, sphere
 
 
-class TestThreePhaseIntegration(unittest.TestCase):
-    def test_agsls_run_records_phase_metadata(self) -> None:
+class TestPointCloudIntegration(unittest.TestCase):
+    def test_point_cloud_run_records_archive_and_batch_metadata(self) -> None:
         smoothlife = SmoothLifeConfig(
             grid_shape=(32, 32),
             evaluations_per_step=4,
@@ -16,38 +14,31 @@ class TestThreePhaseIntegration(unittest.TestCase):
             preset="search",
             subpixel_confirm=False,
         )
-        agsls = AGSLSConfig(
-            max_evaluations=260,
-            max_zoom_cycles=4,
-            exploration_fraction=0.25,
-            commit_fraction=0.60,
-            exploration_steps_per_tick=2,
-            commit_steps_per_zoom=2,
-            exploitation_steps_per_zoom=1,
-            min_basin_cells=4,
-            cluster_min_samples=2,
+        config = PointCloudSearchConfig(
+            max_evaluations=180,
+            initial_design_size=16,
+            batch_size=16,
+            density_grid_shape=(24, 24),
+            portfolio_size=3,
+            local_refinement_max_evaluations=48,
         )
-        search = AdaptiveGridSmoothLifeSearch(sphere, [(-5.0, 5.0), (-5.0, 5.0)], smoothlife, agsls)
+        search = PointCloudSmoothLifeSearch(sphere, [(-5.0, 5.0), (-5.0, 5.0)], smoothlife, config)
         search.reset(seed=3)
         run = search.run()
 
         self.assertGreater(run.evaluations, 0)
-        self.assertLessEqual(run.evaluations, agsls.max_evaluations)
-        self.assertIn("exploration", run.metadata["phase_counts"])
-        self.assertTrue(
-            all(event.diagnostics["phase"] in {"commit", "exploitation"} for event in run.zoom_events)
-        )
-        self.assertFalse(
-            any(event.diagnostics["phase"] == "exploration" for event in run.zoom_events),
-            msg="exploration must never zoom",
-        )
+        self.assertLessEqual(run.evaluations, config.max_evaluations)
+        self.assertEqual(run.metadata["mode"], "point-cloud")
+        self.assertEqual(run.metadata["archive_size"], run.evaluations)
+        self.assertTrue(run.metadata["batch_events"])
+        self.assertEqual(run.zoom_events, [])
 
-    def test_python_api_requires_agsls_budget(self) -> None:
-        search = AdaptiveGridSmoothLifeSearch(
+    def test_python_api_requires_point_cloud_budget(self) -> None:
+        search = PointCloudSmoothLifeSearch(
             sphere,
             [(-5.0, 5.0), (-5.0, 5.0)],
             SmoothLifeConfig(grid_shape=(32, 32), evaluations_per_step=4, preset="search"),
-            AGSLSConfig(max_evaluations=None),
+            PointCloudSearchConfig(max_evaluations=None),
         )
         search.reset(seed=0)
         with self.assertRaisesRegex(ValueError, "max_evaluations"):

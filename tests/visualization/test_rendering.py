@@ -5,7 +5,7 @@ import warnings
 
 import numpy as np
 
-from smooth_life_search import RenderOptions
+from smooth_life_search import PointCloudSnapshot, RenderOptions
 from smooth_life_search.core import SearchRun, SmoothLifeSnapshot
 from smooth_life_search.visualization import render_run_frames, snapshot_to_image
 
@@ -79,6 +79,35 @@ class TestVisualizationRendering(unittest.TestCase):
             frame = render_run_frames(run, options=RenderOptions(scale=1))[0]
 
         self.assertEqual(frame.size, (116, 208))
+
+    def test_point_cloud_snapshot_render_is_nonblank(self) -> None:
+        shape = (16, 16)
+        bounds = np.asarray([[-1.0, 1.0], [-1.0, 1.0]], dtype=float)
+        density = np.zeros(shape, dtype=float)
+        density[7:9, 7:9] = 1.0
+        snapshot = PointCloudSnapshot(
+            step_index=2,
+            bounds=bounds,
+            density_field=density,
+            objective_field=density.copy(),
+            evaluated_mask=density > 0.0,
+            best_point=np.asarray([0.0, 0.0], dtype=float),
+            best_value=0.0,
+            local_best_point=np.asarray([0.0, 0.0], dtype=float),
+            local_best_value=0.0,
+            box_best_point=np.asarray([0.0, 0.0], dtype=float),
+            box_best_value=0.0,
+            archive_points=np.asarray([[0.0, 0.0], [0.25, -0.25]], dtype=float),
+            archive_values=np.asarray([0.0, 0.2], dtype=float),
+            region_bounds=[np.asarray([[-0.5, 0.5], [-0.5, 0.5]], dtype=float)],
+            metadata={"mode": "point-cloud", "evaluations": 2, "explored_fraction": 0.1},
+        )
+
+        image = snapshot_to_image(snapshot, scale=1)
+        pixels = np.asarray(image, dtype=np.uint8)
+
+        self.assertEqual(image.size, (116, 208))
+        self.assertGreater(int(np.max(pixels) - np.min(pixels)), 0)
 
 
 if __name__ == "__main__":

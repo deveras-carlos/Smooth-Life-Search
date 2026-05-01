@@ -1,19 +1,21 @@
-"""SmoothLife Search and three-phase Adaptive Grid Smooth Life Search."""
+"""SmoothLife simulation and point-cloud SmoothLife optimization."""
 
-from .agsls import AGSLSConfig, AdaptiveGridSmoothLifeSearch
 from .benchmark import DEFAULT_BOUNDS, OBJECTIVES, BenchmarkSummary, run_seeded_trials, summarize_results
 from .benchmark import ackley, griewank, himmelblau, rastrigin, rosenbrock, sphere
 from .core import Basin, SearchResult, SearchRun, SmoothLifeSnapshot, ZoomEvent
+from .point_cloud import PointCloudArchive, PointCloudSearchConfig, PointCloudSmoothLifeSearch, PointCloudSnapshot
 from .smoothlife import SmoothLifeConfig, SmoothLifeSearch
 from .visualization import RenderOptions, open_run_viewer, render_run_frames, save_run_animation, snapshot_to_image
 
 __all__ = [
     "DEFAULT_BOUNDS",
     "OBJECTIVES",
-    "AGSLSConfig",
-    "AdaptiveGridSmoothLifeSearch",
     "Basin",
     "BenchmarkSummary",
+    "PointCloudArchive",
+    "PointCloudSearchConfig",
+    "PointCloudSmoothLifeSearch",
+    "PointCloudSnapshot",
     "RenderOptions",
     "SearchResult",
     "SearchRun",

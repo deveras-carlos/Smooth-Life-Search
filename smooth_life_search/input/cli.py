@@ -1,4 +1,4 @@
-"""Packaged command-line entrypoint for SmoothLife Search and AGSLS."""
+"""Packaged command-line entrypoint for SmoothLife simulation and point-cloud search."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import (
-    AGSLSConfig,
-    AdaptiveGridSmoothLifeSearch,
+    PointCloudSearchConfig,
+    PointCloudSmoothLifeSearch,
     SmoothLifeConfig,
     SmoothLifeSearch,
     open_run_viewer,
@@ -39,10 +39,9 @@ def _build_bounds(objective_name: str | None, dimension: int, lower: float | Non
     return [(lower, upper), (lower, upper)]
 
 
-def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]], SmoothLifeConfig, AGSLSConfig]:
+def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]], SmoothLifeConfig, PointCloudSearchConfig]:
     bounds = _build_bounds(args.objective, args.dimension, args.lower, args.upper)
-    smooth_defaults = SmoothLifeConfig()
-    agsls_defaults = AGSLSConfig()
+    cloud_defaults = PointCloudSearchConfig()
     smoothlife = SmoothLifeConfig(
         grid_shape=(args.grid_height, args.grid_width),
         dt=args.dt,
@@ -50,82 +49,60 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         objective_coupling=args.objective_coupling,
         objective_gamma=args.objective_gamma,
         best_improvement_tolerance=args.best_improvement_tolerance,
-        objective_guidance_mode=getattr(args, "objective_guidance_mode", smooth_defaults.objective_guidance_mode),
-        objective_rbf_top_k=getattr(args, "objective_rbf_top_k", smooth_defaults.objective_rbf_top_k),
-        objective_rbf_sigma=getattr(args, "objective_rbf_sigma", smooth_defaults.objective_rbf_sigma),
-        objective_rbf_temperature=getattr(args, "objective_rbf_temperature", smooth_defaults.objective_rbf_temperature),
-        objective_uncertainty_weight=getattr(args, "objective_uncertainty_weight", smooth_defaults.objective_uncertainty_weight),
-        objective_drift_strength=getattr(args, "objective_drift_strength", smooth_defaults.objective_drift_strength),
-        objective_drift_clip=getattr(args, "objective_drift_clip", smooth_defaults.objective_drift_clip),
         run_mode="simulation" if args.command == "simulate" else "search",
         preset=args.preset,
         maximize=args.maximize,
     )
-    agsls = AGSLSConfig(
+    point_cloud = PointCloudSearchConfig(
         max_evaluations=args.budget,
-        max_zoom_cycles=getattr(args, "zoom_cycles", agsls_defaults.max_zoom_cycles),
-        exploration_fraction=getattr(args, "exploration_fraction", agsls_defaults.exploration_fraction),
-        commit_fraction=getattr(args, "commit_fraction", agsls_defaults.commit_fraction),
-        exploration_steps_per_tick=getattr(args, "exploration_steps", agsls_defaults.exploration_steps_per_tick),
-        commit_steps_per_zoom=getattr(args, "commit_steps", agsls_defaults.commit_steps_per_zoom),
-        exploitation_steps_per_zoom=getattr(args, "exploitation_steps", agsls_defaults.exploitation_steps_per_zoom),
-        basin_quantile=getattr(args, "basin_quantile", agsls_defaults.basin_quantile),
-        min_basin_cells=getattr(args, "min_basin_cells", agsls_defaults.min_basin_cells),
-        min_alive_density=getattr(args, "min_alive_density", agsls_defaults.min_alive_density),
-        commit_min_shrink_fraction=getattr(args, "commit_min_shrink_fraction", agsls_defaults.commit_min_shrink_fraction),
-        commit_min_explored_fraction=getattr(args, "commit_min_explored_fraction", agsls_defaults.commit_min_explored_fraction),
-        exploitation_shrink_fraction=getattr(args, "exploitation_shrink_fraction", agsls_defaults.exploitation_shrink_fraction),
-        commit_guidance_top_k=getattr(args, "commit_guidance_top_k", agsls_defaults.commit_guidance_top_k),
-        commit_guidance_sigma=getattr(args, "commit_guidance_sigma", agsls_defaults.commit_guidance_sigma),
-        commit_guidance_temperature=getattr(args, "commit_guidance_temperature", agsls_defaults.commit_guidance_temperature),
-        commit_uncertainty_weight=getattr(args, "commit_uncertainty_weight", agsls_defaults.commit_uncertainty_weight),
-        commit_drift_strength=getattr(args, "commit_drift_strength", agsls_defaults.commit_drift_strength),
-        exploitation_guidance_top_k=getattr(args, "exploitation_guidance_top_k", agsls_defaults.exploitation_guidance_top_k),
-        exploitation_guidance_sigma=getattr(args, "exploitation_guidance_sigma", agsls_defaults.exploitation_guidance_sigma),
-        exploitation_guidance_temperature=getattr(args, "exploitation_guidance_temperature", agsls_defaults.exploitation_guidance_temperature),
-        exploitation_uncertainty_weight=getattr(args, "exploitation_uncertainty_weight", agsls_defaults.exploitation_uncertainty_weight),
-        exploitation_drift_strength=getattr(args, "exploitation_drift_strength", agsls_defaults.exploitation_drift_strength),
-        commit_surrogate_enabled=getattr(args, "commit_surrogate_enabled", agsls_defaults.commit_surrogate_enabled),
-        commit_surrogate_min_samples=getattr(args, "commit_surrogate_min_samples", agsls_defaults.commit_surrogate_min_samples),
-        commit_surrogate_max_samples=getattr(args, "commit_surrogate_max_samples", agsls_defaults.commit_surrogate_max_samples),
-        trust_region_enabled=getattr(args, "trust_region_enabled", agsls_defaults.trust_region_enabled),
-        commit_trust_region_evaluations=getattr(
-            args,
-            "commit_trust_region_evaluations",
-            agsls_defaults.commit_trust_region_evaluations,
+        batch_size=getattr(args, "batch_size", cloud_defaults.batch_size),
+        initial_design_size=getattr(args, "initial_design_size", cloud_defaults.initial_design_size),
+        max_batches=getattr(args, "max_batches", cloud_defaults.max_batches),
+        density_grid_shape=(
+            getattr(args, "density_grid_height", cloud_defaults.density_grid_shape[0]),
+            getattr(args, "density_grid_width", cloud_defaults.density_grid_shape[1]),
         ),
-        exploitation_trust_region_evaluations=getattr(
+        density_elite_fraction=getattr(args, "density_elite_fraction", cloud_defaults.density_elite_fraction),
+        density_sigma_fraction=getattr(args, "density_sigma_fraction", cloud_defaults.density_sigma_fraction),
+        density_smooth_steps=getattr(args, "density_smooth_steps", cloud_defaults.density_smooth_steps),
+        portfolio_size=getattr(args, "portfolio_size", cloud_defaults.portfolio_size),
+        elite_fraction=getattr(args, "elite_fraction", cloud_defaults.elite_fraction),
+        trust_regions_enabled=getattr(args, "trust_regions_enabled", cloud_defaults.trust_regions_enabled),
+        region_initial_radius_fraction=getattr(
             args,
-            "exploitation_trust_region_evaluations",
-            agsls_defaults.exploitation_trust_region_evaluations,
+            "region_initial_radius_fraction",
+            cloud_defaults.region_initial_radius_fraction,
         ),
-        trust_region_candidate_pool_size=getattr(
+        region_min_radius_fraction=getattr(args, "region_min_radius_fraction", cloud_defaults.region_min_radius_fraction),
+        region_max_radius_fraction=getattr(args, "region_max_radius_fraction", cloud_defaults.region_max_radius_fraction),
+        region_expand_factor=getattr(args, "region_expand_factor", cloud_defaults.region_expand_factor),
+        region_shrink_factor=getattr(args, "region_shrink_factor", cloud_defaults.region_shrink_factor),
+        region_candidate_fraction=getattr(args, "region_candidate_fraction", cloud_defaults.region_candidate_fraction),
+        density_candidate_fraction=getattr(args, "density_candidate_fraction", cloud_defaults.density_candidate_fraction),
+        global_candidate_fraction=getattr(args, "global_candidate_fraction", cloud_defaults.global_candidate_fraction),
+        exploit_candidate_fraction=getattr(args, "exploit_candidate_fraction", cloud_defaults.exploit_candidate_fraction),
+        surrogate_enabled=getattr(args, "surrogate_enabled", cloud_defaults.surrogate_enabled),
+        surrogate_min_samples=getattr(args, "surrogate_min_samples", cloud_defaults.surrogate_min_samples),
+        surrogate_max_samples=getattr(args, "surrogate_max_samples", cloud_defaults.surrogate_max_samples),
+        local_refinement_enabled=getattr(args, "local_refinement_enabled", cloud_defaults.local_refinement_enabled),
+        local_refinement_start_evaluations=getattr(
             args,
-            "trust_region_candidate_pool_size",
-            agsls_defaults.trust_region_candidate_pool_size,
+            "local_refinement_start_evaluations",
+            cloud_defaults.local_refinement_start_evaluations,
         ),
-        trust_region_initial_radius_fraction=getattr(
+        local_refinement_max_evaluations=getattr(
             args,
-            "trust_region_initial_radius_fraction",
-            agsls_defaults.trust_region_initial_radius_fraction,
+            "local_refinement_max_evaluations",
+            cloud_defaults.local_refinement_max_evaluations,
         ),
-        exploitation_valley_tracking_enabled=getattr(
+        local_refinement_step_fraction=getattr(
             args,
-            "exploitation_valley_tracking_enabled",
-            agsls_defaults.exploitation_valley_tracking_enabled,
+            "local_refinement_step_fraction",
+            cloud_defaults.local_refinement_step_fraction,
         ),
-        exploitation_valley_probe_evaluations=getattr(
-            args,
-            "exploitation_valley_probe_evaluations",
-            agsls_defaults.exploitation_valley_probe_evaluations,
-        ),
-        exploitation_valley_step_fraction=getattr(
-            args,
-            "exploitation_valley_step_fraction",
-            agsls_defaults.exploitation_valley_step_fraction,
-        ),
+        best_improvement_tolerance=args.best_improvement_tolerance,
     )
-    return bounds, smoothlife, agsls
+    return bounds, smoothlife, point_cloud
 
 
 def _objective_from_args(args: argparse.Namespace) -> ObjectiveFn:
@@ -144,22 +121,6 @@ def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
     }
 
 
-def _zoom_payload(run: Any) -> list[dict[str, Any]]:
-    return [
-        {
-            "zoom_index": event.zoom_index,
-            "steps_per_zoom": event.steps_per_zoom,
-            "old_bounds": event.old_bounds.tolist(),
-            "new_bounds": event.new_bounds.tolist(),
-            "selected_basin_score": event.selected_basin_score,
-            "selected_basin_bbox": event.selected_basin_bbox.tolist(),
-            "evaluation_count": event.evaluation_count,
-            "diagnostics": dict(event.diagnostics),
-        }
-        for event in run.zoom_events
-    ]
-
-
 def _maybe_write_animation(run: Any, gif_path: str | None) -> str | None:
     if not gif_path:
         return None
@@ -176,7 +137,7 @@ def _maybe_show_animation(run: Any, show: bool, title: str) -> None:
 
 def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
-    bounds, smoothlife, _ = _build_configs(args)
+    bounds, smoothlife, _point_cloud = _build_configs(args)
     engine = SmoothLifeSearch(objective, bounds, smoothlife)
     engine.reset(seed=args.seed)
     run = engine.run(steps=args.steps)
@@ -196,17 +157,17 @@ def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
+def run_point_cloud_command(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
-    bounds, smoothlife, agsls = _build_configs(args)
-    controller = AdaptiveGridSmoothLifeSearch(objective, bounds, smoothlife, agsls)
-    controller.reset(seed=args.seed)
-    run = controller.run(zoom_cycles=args.zoom_cycles, evaluations=args.budget)
-    run.metadata.update({"mode": "agsls", "objective": args.objective})
+    bounds, smoothlife, point_cloud = _build_configs(args)
+    search = PointCloudSmoothLifeSearch(objective, bounds, smoothlife, point_cloud)
+    search.reset(seed=args.seed)
+    run = search.run(evaluations=args.budget)
+    run.metadata.update({"mode": "point-cloud", "objective": args.objective})
     gif_path = _maybe_write_animation(run, args.gif)
-    _maybe_show_animation(run, args.show, title="AGSLS")
+    _maybe_show_animation(run, args.show, title="Point-Cloud SmoothLife")
     return {
-        "mode": "agsls",
+        "mode": "point-cloud",
         "objective": args.objective,
         "dimension": args.dimension,
         "seed": args.seed,
@@ -215,30 +176,27 @@ def run_agsls_command(args: argparse.Namespace) -> dict[str, Any]:
         "best_value": run.best_value,
         "best_point": run.best_point.tolist(),
         "bounds": run.bounds.tolist(),
-        "zoom_events": _zoom_payload(run),
-        "phase_counts": run.metadata.get("phase_counts", {}),
-        "decision_trace": run.metadata.get("decision_trace", []),
+        "archive_size": run.metadata.get("archive_size", 0),
+        "portfolio": run.metadata.get("portfolio", []),
+        "batch_events": run.metadata.get("batch_events", []),
+        "region_events": run.metadata.get("region_events", []),
         "trust_region_events": run.metadata.get("trust_region_events", []),
         "snapshots": [_snapshot_payload(snapshot) for snapshot in run.snapshots],
         "gif_path": gif_path,
     }
 
 
-def run_single(args: argparse.Namespace) -> dict[str, Any]:
-    return run_agsls_command(args) | {"mode": "single"}
-
-
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
-    bounds, smoothlife, agsls = _build_configs(args)
+    bounds, smoothlife, point_cloud = _build_configs(args)
     seeds = list(range(args.seed_start, args.seed_start + args.trials))
 
-    def search_factory(_seed: int) -> AdaptiveGridSmoothLifeSearch:
-        return AdaptiveGridSmoothLifeSearch(
+    def search_factory(_seed: int) -> PointCloudSmoothLifeSearch:
+        return PointCloudSmoothLifeSearch(
             objective,
             bounds,
             replace(smoothlife, maximize=args.maximize),
-            replace(agsls, max_evaluations=args.budget),
+            replace(point_cloud, max_evaluations=args.budget),
         )
 
     results = run_seeded_trials(search_factory, seeds)
@@ -260,7 +218,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _print_single(payload: dict[str, Any], show_stages: bool) -> None:
+def _print_point_cloud(payload: dict[str, Any], show_batches: bool) -> None:
     print(f"objective: {payload['objective']}")
     print(f"dimension: {payload['dimension']}")
     print(f"seed: {payload['seed']}")
@@ -268,15 +226,16 @@ def _print_single(payload: dict[str, Any], show_stages: bool) -> None:
     print(f"evaluations: {payload['evaluations']}")
     print(f"best value: {payload['best_value']:e}")
     print(f"best point: {payload['best_point']}")
-    print(f"phase counts: {payload['phase_counts']}")
-    if show_stages:
-        print("zoom events:")
-        for event in payload["zoom_events"]:
-            diagnostics = event["diagnostics"]
+    print(f"archive size: {payload['archive_size']}")
+    print(f"portfolio size: {len(payload['portfolio'])}")
+    if show_batches:
+        print("batch events:")
+        for event in payload["batch_events"]:
             print(
                 "  "
-                f"zoom={event['zoom_index']} phase={diagnostics.get('phase')} "
-                f"reason={diagnostics.get('zoom_reason')} bounds={event['new_bounds']}"
+                f"batch={event['batch_index']} kind={event['kind']} "
+                f"spent={event['evaluations_spent']} improved={event['improved']} "
+                f"best={event['best_after']:e}"
             )
     if payload["gif_path"] is not None:
         print(f"gif: {payload['gif_path']}")
@@ -305,9 +264,9 @@ def _print_benchmark(payload: dict[str, Any]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    agsls_defaults = AGSLSConfig()
+    cloud_defaults = PointCloudSearchConfig()
     parser = argparse.ArgumentParser(
-        description="Run SmoothLife simulation and three-phase AGSLS jobs.",
+        description="Run SmoothLife simulation and point-cloud SmoothLife optimization jobs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", type=str, default=None, help="Optional JSON/TOML file providing parser defaults.")
@@ -316,7 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("--objective", choices=sorted(OBJECTIVES), default=None, help="Benchmark objective to optimize.")
     shared.add_argument("--dimension", type=int, default=2, help="Problem dimension. Only 2D is currently supported.")
-    shared.add_argument("--budget", type=int, default=None, help="Objective evaluation budget for AGSLS.")
+    shared.add_argument("--budget", type=int, default=None, help="Objective evaluation budget.")
     shared.add_argument("--lower", type=float, default=None, help="Lower bound for every coordinate.")
     shared.add_argument("--upper", type=float, default=None, help="Upper bound for every coordinate.")
     shared.add_argument("--maximize", action="store_true", help="Treat the objective as a maximization problem.")
@@ -332,53 +291,44 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("--gif", type=str, default=None, help="Optional GIF output path.")
     shared.add_argument("--show", action="store_true", help="Open the animation in a Tk GUI viewer after the run completes.")
 
-    agsls_shared = argparse.ArgumentParser(add_help=False)
-    agsls_shared.add_argument("--zoom-cycles", type=int, default=agsls_defaults.max_zoom_cycles, help="Maximum number of AGSLS zooms.")
-    agsls_shared.add_argument("--exploration-fraction", type=float, default=agsls_defaults.exploration_fraction, help="Budget fraction spent with SmoothLife only.")
-    agsls_shared.add_argument("--commit-fraction", type=float, default=agsls_defaults.commit_fraction, help="Budget fraction where commit ends and exploitation begins.")
-    agsls_shared.add_argument("--exploration-steps", type=int, default=agsls_defaults.exploration_steps_per_tick, help="SmoothLife steps per exploration tick.")
-    agsls_shared.add_argument("--commit-steps", type=int, default=agsls_defaults.commit_steps_per_zoom, help="SmoothLife steps before each commit zoom.")
-    agsls_shared.add_argument("--exploitation-steps", type=int, default=agsls_defaults.exploitation_steps_per_zoom, help="SmoothLife steps before each exploitation zoom.")
-    agsls_shared.add_argument("--basin-quantile", type=float, default=agsls_defaults.basin_quantile, help="Support-field quantile used to detect basins.")
-    agsls_shared.add_argument("--min-basin-cells", type=int, default=agsls_defaults.min_basin_cells, help="Minimum cells for a basin to be zoom-eligible.")
-    agsls_shared.add_argument("--min-alive-density", type=float, default=agsls_defaults.min_alive_density, help="Minimum alive density for a basin to be zoom-eligible.")
-    agsls_shared.add_argument("--commit-min-shrink-fraction", type=float, default=agsls_defaults.commit_min_shrink_fraction, help="Commit zoom side floor as a fraction of current bounds.")
-    agsls_shared.add_argument("--commit-min-explored-fraction", type=float, default=agsls_defaults.commit_min_explored_fraction, help="Minimum active-box explored fraction before commit can zoom.")
-    agsls_shared.add_argument("--exploitation-shrink-fraction", type=float, default=agsls_defaults.exploitation_shrink_fraction, help="Aggressive exploitation side shrink factor.")
-    agsls_shared.add_argument("--commit-guidance-top-k", type=int, default=agsls_defaults.commit_guidance_top_k, help="Top evaluated samples used for commit RBF guidance.")
-    agsls_shared.add_argument("--commit-guidance-sigma", type=float, default=agsls_defaults.commit_guidance_sigma, help="Commit RBF guidance sigma in normalized box units.")
-    agsls_shared.add_argument("--commit-guidance-temperature", type=float, default=agsls_defaults.commit_guidance_temperature, help="Commit RBF softmax temperature.")
-    agsls_shared.add_argument("--commit-uncertainty-weight", type=float, default=agsls_defaults.commit_uncertainty_weight, help="Commit unevaluated-cell bonus near guided support.")
-    agsls_shared.add_argument("--commit-drift-strength", type=float, default=agsls_defaults.commit_drift_strength, help="Commit objective-gradient drift strength.")
-    agsls_shared.add_argument("--exploitation-guidance-top-k", type=int, default=agsls_defaults.exploitation_guidance_top_k, help="Top evaluated samples used for exploitation RBF guidance.")
-    agsls_shared.add_argument("--exploitation-guidance-sigma", type=float, default=agsls_defaults.exploitation_guidance_sigma, help="Exploitation RBF guidance sigma in normalized box units.")
-    agsls_shared.add_argument("--exploitation-guidance-temperature", type=float, default=agsls_defaults.exploitation_guidance_temperature, help="Exploitation RBF softmax temperature.")
-    agsls_shared.add_argument("--exploitation-uncertainty-weight", type=float, default=agsls_defaults.exploitation_uncertainty_weight, help="Exploitation unevaluated-cell bonus near guided support.")
-    agsls_shared.add_argument("--exploitation-drift-strength", type=float, default=agsls_defaults.exploitation_drift_strength, help="Exploitation objective-gradient drift strength.")
-    agsls_shared.add_argument("--no-commit-surrogate", dest="commit_surrogate_enabled", action="store_false", default=agsls_defaults.commit_surrogate_enabled, help="Disable the commit-phase quadratic surrogate zoom helper.")
-    agsls_shared.add_argument("--commit-surrogate-min-samples", type=int, default=agsls_defaults.commit_surrogate_min_samples, help="Minimum evaluated samples required for commit surrogate fitting.")
-    agsls_shared.add_argument("--commit-surrogate-max-samples", type=int, default=agsls_defaults.commit_surrogate_max_samples, help="Maximum evaluated samples used for commit surrogate fitting.")
-    agsls_shared.add_argument("--no-trust-region", dest="trust_region_enabled", action="store_false", default=agsls_defaults.trust_region_enabled, help="Disable trust-region acquisition batches in commit/exploitation.")
-    agsls_shared.add_argument("--trust-region-commit-evals", dest="commit_trust_region_evaluations", type=int, default=agsls_defaults.commit_trust_region_evaluations, help="Maximum trust-region probes per commit decision.")
-    agsls_shared.add_argument("--trust-region-exploitation-evals", dest="exploitation_trust_region_evaluations", type=int, default=agsls_defaults.exploitation_trust_region_evaluations, help="Maximum trust-region probes per exploitation decision.")
-    agsls_shared.add_argument("--trust-region-candidates", dest="trust_region_candidate_pool_size", type=int, default=agsls_defaults.trust_region_candidate_pool_size, help="Candidate pool size for trust-region acquisition.")
-    agsls_shared.add_argument("--trust-region-initial-radius-fraction", type=float, default=agsls_defaults.trust_region_initial_radius_fraction, help="Initial trust-region radius as a fraction of active bounds.")
-    agsls_shared.add_argument("--no-exploitation-valley-tracking", dest="exploitation_valley_tracking_enabled", action="store_false", default=agsls_defaults.exploitation_valley_tracking_enabled, help="Disable exploitation valley/manifold probe tracking.")
-    agsls_shared.add_argument("--exploitation-valley-probes", dest="exploitation_valley_probe_evaluations", type=int, default=agsls_defaults.exploitation_valley_probe_evaluations, help="Maximum objective probes used for exploitation valley tracking.")
-    agsls_shared.add_argument("--exploitation-valley-step-fraction", type=float, default=agsls_defaults.exploitation_valley_step_fraction, help="Initial normalized step used by exploitation valley tracking.")
+    cloud_shared = argparse.ArgumentParser(add_help=False)
+    cloud_shared.add_argument("--batch-size", type=int, default=cloud_defaults.batch_size, help="Candidate batch size.")
+    cloud_shared.add_argument("--initial-design-size", type=int, default=cloud_defaults.initial_design_size, help="Initial archive design size.")
+    cloud_shared.add_argument("--max-batches", type=int, default=cloud_defaults.max_batches, help="Optional maximum candidate batches.")
+    cloud_shared.add_argument("--density-grid-height", type=int, default=cloud_defaults.density_grid_shape[0], help="Derived density grid height.")
+    cloud_shared.add_argument("--density-grid-width", type=int, default=cloud_defaults.density_grid_shape[1], help="Derived density grid width.")
+    cloud_shared.add_argument("--density-elite-fraction", type=float, default=cloud_defaults.density_elite_fraction, help="Archive fraction used to rasterize density.")
+    cloud_shared.add_argument("--density-sigma-fraction", type=float, default=cloud_defaults.density_sigma_fraction, help="RBF sigma for density rasterization in normalized units.")
+    cloud_shared.add_argument("--density-smooth-steps", type=int, default=cloud_defaults.density_smooth_steps, help="SmoothLife-style density smoothing steps.")
+    cloud_shared.add_argument("--portfolio-size", type=int, default=cloud_defaults.portfolio_size, help="Maximum adaptive proposal regions.")
+    cloud_shared.add_argument("--elite-fraction", type=float, default=cloud_defaults.elite_fraction, help="Archive fraction used to seed regions.")
+    cloud_shared.add_argument("--no-trust-regions", dest="trust_regions_enabled", action="store_false", default=cloud_defaults.trust_regions_enabled, help="Disable adaptive region candidate batches.")
+    cloud_shared.add_argument("--region-initial-radius-fraction", type=float, default=cloud_defaults.region_initial_radius_fraction, help="Initial region radius in normalized box units.")
+    cloud_shared.add_argument("--region-min-radius-fraction", type=float, default=cloud_defaults.region_min_radius_fraction, help="Minimum region radius in normalized box units.")
+    cloud_shared.add_argument("--region-max-radius-fraction", type=float, default=cloud_defaults.region_max_radius_fraction, help="Maximum region radius in normalized box units.")
+    cloud_shared.add_argument("--region-expand-factor", type=float, default=cloud_defaults.region_expand_factor, help="Radius multiplier after region success.")
+    cloud_shared.add_argument("--region-shrink-factor", type=float, default=cloud_defaults.region_shrink_factor, help="Radius multiplier after region failure.")
+    cloud_shared.add_argument("--region-candidate-fraction", type=float, default=cloud_defaults.region_candidate_fraction, help="Batch fraction drawn from proposal regions.")
+    cloud_shared.add_argument("--density-candidate-fraction", type=float, default=cloud_defaults.density_candidate_fraction, help="Batch fraction sampled from the density view.")
+    cloud_shared.add_argument("--global-candidate-fraction", type=float, default=cloud_defaults.global_candidate_fraction, help="Batch fraction sampled globally.")
+    cloud_shared.add_argument("--exploit-candidate-fraction", type=float, default=cloud_defaults.exploit_candidate_fraction, help="Batch fraction probing near the incumbent.")
+    cloud_shared.add_argument("--no-surrogate", dest="surrogate_enabled", action="store_false", default=cloud_defaults.surrogate_enabled, help="Disable local quadratic surrogate region candidates.")
+    cloud_shared.add_argument("--surrogate-min-samples", type=int, default=cloud_defaults.surrogate_min_samples, help="Minimum samples for local quadratic fits.")
+    cloud_shared.add_argument("--surrogate-max-samples", type=int, default=cloud_defaults.surrogate_max_samples, help="Maximum samples for local quadratic fits.")
+    cloud_shared.add_argument("--no-local-refinement", dest="local_refinement_enabled", action="store_false", default=cloud_defaults.local_refinement_enabled, help="Disable finite-difference local refinement probes.")
+    cloud_shared.add_argument("--local-refinement-start-evaluations", type=int, default=cloud_defaults.local_refinement_start_evaluations, help="Archive size before local refinement can run.")
+    cloud_shared.add_argument("--local-refinement-max-evaluations", type=int, default=cloud_defaults.local_refinement_max_evaluations, help="Maximum local-refinement evaluations per run.")
+    cloud_shared.add_argument("--local-refinement-step-fraction", type=float, default=cloud_defaults.local_refinement_step_fraction, help="Maximum local-refinement step in normalized box units.")
 
-    single = subparsers.add_parser("single", parents=[shared, agsls_shared], help="Run one AGSLS optimization job.")
-    single.add_argument("--show-stages", action="store_true", help="Print per-zoom details.")
-    single.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    point_cloud = subparsers.add_parser("point-cloud", parents=[shared, cloud_shared], help="Run point-cloud SmoothLife optimization.")
+    point_cloud.add_argument("--show-batches", action="store_true", help="Print per-batch details.")
+    point_cloud.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
-    agsls = subparsers.add_parser("agsls", parents=[shared, agsls_shared], help="Run AGSLS explicitly.")
-    agsls.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-
-    simulate = subparsers.add_parser("simulate", parents=[shared], help="Run the literal SmoothLife simulator without adaptive zoom.")
+    simulate = subparsers.add_parser("simulate", parents=[shared], help="Run the literal SmoothLife simulator.")
     simulate.add_argument("--steps", type=int, default=24, help="Number of SmoothLife steps to run.")
     simulate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
-    benchmark = subparsers.add_parser("benchmark", parents=[shared, agsls_shared], help="Run repeated seeded AGSLS trials.")
+    benchmark = subparsers.add_parser("benchmark", parents=[shared, cloud_shared], help="Run repeated seeded point-cloud trials.")
     benchmark.add_argument("--seed-start", type=int, default=0, help="First seed in the benchmark sweep.")
     benchmark.add_argument("--trials", type=int, default=10, help="Number of seeded runs.")
     benchmark.add_argument("--success-threshold", type=float, default=0.1, help="Best-value threshold for counting a run as successful.")
@@ -400,29 +350,22 @@ def main(argv: list[str] | None = None) -> int:
             for token in raw_argv
             if token.startswith("--") and token != "--config"
         }
-        if "no_commit_surrogate" in explicit_dests:
-            explicit_dests.add("commit_surrogate_enabled")
-        if "no_trust_region" in explicit_dests:
-            explicit_dests.add("trust_region_enabled")
-        if "no_exploitation_valley_tracking" in explicit_dests:
-            explicit_dests.add("exploitation_valley_tracking_enabled")
+        if "no_trust_regions" in explicit_dests:
+            explicit_dests.add("trust_regions_enabled")
+        if "no_surrogate" in explicit_dests:
+            explicit_dests.add("surrogate_enabled")
+        if "no_local_refinement" in explicit_dests:
+            explicit_dests.add("local_refinement_enabled")
         for key, value in load_config_file(config_args.config).items():
             if key not in explicit_dests:
                 setattr(args, key, value)
     try:
-        if args.command == "single":
-            payload = run_single(args)
+        if args.command == "point-cloud":
+            payload = run_point_cloud_command(args)
             if args.json:
                 print(json.dumps(payload, indent=2))
             else:
-                _print_single(payload, show_stages=args.show_stages)
-            return 0
-        if args.command == "agsls":
-            payload = run_agsls_command(args)
-            if args.json:
-                print(json.dumps(payload, indent=2))
-            else:
-                _print_single(payload, show_stages=True)
+                _print_point_cloud(payload, show_batches=args.show_batches)
             return 0
         if args.command == "simulate":
             payload = run_simulation(args)
@@ -443,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-__all__ = ["build_parser", "main", "run_agsls_command", "run_benchmark", "run_simulation", "run_single"]
+__all__ = ["build_parser", "main", "run_benchmark", "run_point_cloud_command", "run_simulation"]
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ DEFERRED = (160, 160, 160)
 def support_field(snapshot: SmoothLifeSnapshot) -> np.ndarray:
     """Return the displayed support field for one snapshot."""
 
+    if str(snapshot.metadata.get("mode", "")) == "point-cloud" and hasattr(snapshot, "density_field"):
+        return np.asarray(getattr(snapshot, "density_field"), dtype=float)
     return np.clip(1.0 - np.abs(snapshot.field), 0.0, 1.0) * snapshot.objective_field
 
 

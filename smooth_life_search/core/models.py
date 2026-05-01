@@ -92,13 +92,13 @@ class ZoomEvent:
 
 @dataclass(slots=True)
 class SearchRun:
-    """Final run artifact for SmoothLife Search and AGSLS."""
+    """Final run artifact for SmoothLife simulation and optimizers."""
 
     best_point: np.ndarray
     best_value: float
     evaluations: int
     bounds: np.ndarray
-    snapshots: list[SmoothLifeSnapshot]
+    snapshots: list[Any]
     zoom_events: list[ZoomEvent]
     metadata: dict[str, Any] = field(default_factory=dict)
 

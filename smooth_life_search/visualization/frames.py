@@ -130,6 +130,20 @@ def _draw_group_overlays( draw: ImageDraw.ImageDraw, snapshot: SmoothLifeSnapsho
         draw.text( ( x + 4, y + 4 ), f"#{ rank_text } d={ density_text }", fill=_TEXT_PRIMARY )
 
 
+def _draw_point_cloud_overlays( draw: ImageDraw.ImageDraw, snapshot: SmoothLifeSnapshot, image_size: tuple[ int, int ] ) -> None:
+    archive_points = getattr( snapshot, "archive_points", None )
+    if archive_points is not None:
+        points = np.asarray( archive_points, dtype=float )
+        if points.ndim == 2 and points.shape[1] == 2:
+            for point in points[-250:]:
+                x, y = world_to_image_xy( point, snapshot.bounds, image_size )
+                draw.rectangle( ( x - 1, y - 1, x + 1, y + 1 ), fill=( 210, 215, 222 ) )
+    for bbox_world in getattr( snapshot, "region_bounds", [ ] ):
+        bbox = np.asarray( bbox_world, dtype=float )
+        if bbox.shape == ( 2, 2 ):
+            draw_bbox( draw, bbox, snapshot.bounds, image_size, color=_ZOOM_BOX )
+
+
 def snapshot_to_image(
     snapshot: SmoothLifeSnapshot,
     scale: int = 2,
@@ -179,7 +193,10 @@ def snapshot_to_image(
         draw_bbox( field_draw, snapshot.selected_basin_bbox, snapshot.bounds, field_panel.size, color=_ZOOM_BOX )
 
     support_draw = ImageDraw.Draw( support_panel )
-    _draw_group_overlays( support_draw, snapshot, support_panel.size )
+    if str( snapshot.metadata.get( "mode", "" ) ) == "point-cloud":
+        _draw_point_cloud_overlays( support_draw, snapshot, support_panel.size )
+    else:
+        _draw_group_overlays( support_draw, snapshot, support_panel.size )
     draw_point_marker(
         support_draw,
         snapshot.best_point,
@@ -216,14 +233,24 @@ def snapshot_to_image(
         font=font,
     )
 
-    panel_specs = [
-        ( field_panel, "signed field + accepted path", 0, 0 ),
-        ( objective_panel, "explored objective desirability", 0, 1 ),
-        ( support_panel, "support + dense groups", 0, 2 ),
-        ( transition_panel, "transition target", 1, 0 ),
-        ( vitality_panel, "vitality", 1, 1 ),
-        ( convergence_panel, "convergence", 1, 2 ),
-    ]
+    if str( snapshot.metadata.get( "mode", "" ) ) == "point-cloud":
+        panel_specs = [
+            ( field_panel, "proposal density + path", 0, 0 ),
+            ( objective_panel, "archive desirability view", 0, 1 ),
+            ( support_panel, "archive + regions", 0, 2 ),
+            ( transition_panel, "density transition view", 1, 0 ),
+            ( vitality_panel, "density vitality", 1, 1 ),
+            ( convergence_panel, "convergence", 1, 2 ),
+        ]
+    else:
+        panel_specs = [
+            ( field_panel, "signed field + accepted path", 0, 0 ),
+            ( objective_panel, "explored objective desirability", 0, 1 ),
+            ( support_panel, "support + dense groups", 0, 2 ),
+            ( transition_panel, "transition target", 1, 0 ),
+            ( vitality_panel, "vitality", 1, 1 ),
+            ( convergence_panel, "convergence", 1, 2 ),
+        ]
 
     for panel_image, panel_title, row, col in panel_specs:
         box = _panel_box( panel_size, row, col )
@@ -240,10 +267,6 @@ def snapshot_to_image(
 
     footer_top = canvas_height - _FOOTER_HEIGHT + 10
     draw.text( ( _PANEL_MARGIN, footer_top ), _footer_text( snapshot, resolved_index ), fill=_TEXT_PRIMARY, font=font )
-    draw.text(
-        ( _PANEL_MARGIN, footer_top + 34 ),
-        "Unexplored pixels are dark in the objective panel. Red boxes show dense groups; gray convergence markers indicate deferred zoom decisions.",
-        fill=_TEXT_SECONDARY,
-        font=font,
-    )
+    footer_note = "Archive samples are light marks and red boxes show adaptive proposal regions." if str( snapshot.metadata.get( "mode", "" ) ) == "point-cloud" else "Unexplored pixels are dark in the objective panel. Red boxes show dense groups; gray convergence markers indicate deferred zoom decisions."
+    draw.text( ( _PANEL_MARGIN, footer_top + 34 ), footer_note, fill=_TEXT_SECONDARY, font=font )
     return canvas

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 
+from smooth_life_search import PointCloudSearchConfig
 from smooth_life_search.input import load_config_file, merge_config_overrides
 from smooth_life_search.input.cli import build_parser
-from smooth_life_search import AGSLSConfig
 
 
 class TestConfigLoading(unittest.TestCase):
@@ -36,81 +38,69 @@ class TestConfigLoading(unittest.TestCase):
         merged = merge_config_overrides({"budget": 100, "seed": 1}, {"budget": None, "seed": 7})
         self.assertEqual(merged, {"budget": 100, "seed": 7})
 
-    def test_cli_agsls_defaults_match_config_defaults(self) -> None:
-        args = build_parser().parse_args(["agsls", "--objective", "sphere", "--budget", "100"])
-        defaults = AGSLSConfig()
+    def test_cli_point_cloud_defaults_match_config_defaults(self) -> None:
+        args = build_parser().parse_args(["point-cloud", "--objective", "sphere", "--budget", "100"])
+        defaults = PointCloudSearchConfig()
 
-        self.assertEqual(args.zoom_cycles, defaults.max_zoom_cycles)
-        self.assertEqual(args.commit_fraction, defaults.commit_fraction)
-        self.assertEqual(args.commit_steps, defaults.commit_steps_per_zoom)
-        self.assertEqual(args.exploitation_steps, defaults.exploitation_steps_per_zoom)
-        self.assertEqual(args.exploitation_shrink_fraction, defaults.exploitation_shrink_fraction)
-        self.assertEqual(args.commit_guidance_top_k, defaults.commit_guidance_top_k)
-        self.assertEqual(args.exploitation_guidance_sigma, defaults.exploitation_guidance_sigma)
-        self.assertEqual(args.commit_surrogate_enabled, defaults.commit_surrogate_enabled)
-        self.assertEqual(args.commit_surrogate_min_samples, defaults.commit_surrogate_min_samples)
-        self.assertEqual(args.commit_surrogate_max_samples, defaults.commit_surrogate_max_samples)
-        self.assertEqual(args.trust_region_enabled, defaults.trust_region_enabled)
-        self.assertEqual(args.commit_trust_region_evaluations, defaults.commit_trust_region_evaluations)
-        self.assertEqual(args.exploitation_trust_region_evaluations, defaults.exploitation_trust_region_evaluations)
-        self.assertEqual(args.trust_region_candidate_pool_size, defaults.trust_region_candidate_pool_size)
-        self.assertEqual(args.trust_region_initial_radius_fraction, defaults.trust_region_initial_radius_fraction)
-        self.assertEqual(args.exploitation_valley_tracking_enabled, defaults.exploitation_valley_tracking_enabled)
-        self.assertEqual(args.exploitation_valley_probe_evaluations, defaults.exploitation_valley_probe_evaluations)
-        self.assertEqual(args.exploitation_valley_step_fraction, defaults.exploitation_valley_step_fraction)
+        self.assertEqual(args.batch_size, defaults.batch_size)
+        self.assertEqual(args.initial_design_size, defaults.initial_design_size)
+        self.assertEqual(args.portfolio_size, defaults.portfolio_size)
+        self.assertEqual(args.density_grid_height, defaults.density_grid_shape[0])
+        self.assertEqual(args.density_grid_width, defaults.density_grid_shape[1])
+        self.assertEqual(args.trust_regions_enabled, defaults.trust_regions_enabled)
+        self.assertEqual(args.surrogate_enabled, defaults.surrogate_enabled)
+        self.assertEqual(args.local_refinement_enabled, defaults.local_refinement_enabled)
+        self.assertEqual(args.local_refinement_max_evaluations, defaults.local_refinement_max_evaluations)
 
-    def test_cli_can_disable_commit_surrogate(self) -> None:
-        args = build_parser().parse_args(
-            ["agsls", "--objective", "sphere", "--budget", "100", "--no-commit-surrogate"]
-        )
-
-        self.assertFalse(args.commit_surrogate_enabled)
-
-    def test_cli_can_configure_trust_region(self) -> None:
+    def test_cli_can_disable_point_cloud_features(self) -> None:
         args = build_parser().parse_args(
             [
-                "agsls",
+                "point-cloud",
                 "--objective",
                 "sphere",
                 "--budget",
                 "100",
-                "--no-trust-region",
-                "--trust-region-commit-evals",
-                "3",
-                "--trust-region-exploitation-evals",
-                "5",
-                "--trust-region-candidates",
-                "24",
-                "--trust-region-initial-radius-fraction",
-                "0.1",
+                "--no-trust-regions",
+                "--no-surrogate",
+                "--no-local-refinement",
             ]
         )
 
-        self.assertFalse(args.trust_region_enabled)
-        self.assertEqual(args.commit_trust_region_evaluations, 3)
-        self.assertEqual(args.exploitation_trust_region_evaluations, 5)
-        self.assertEqual(args.trust_region_candidate_pool_size, 24)
-        self.assertAlmostEqual(args.trust_region_initial_radius_fraction, 0.1)
+        self.assertFalse(args.trust_regions_enabled)
+        self.assertFalse(args.surrogate_enabled)
+        self.assertFalse(args.local_refinement_enabled)
 
-    def test_cli_can_configure_exploitation_valley_tracking(self) -> None:
+    def test_cli_can_configure_point_cloud_controls(self) -> None:
         args = build_parser().parse_args(
             [
-                "agsls",
+                "point-cloud",
                 "--objective",
                 "sphere",
                 "--budget",
                 "100",
-                "--no-exploitation-valley-tracking",
-                "--exploitation-valley-probes",
-                "3",
-                "--exploitation-valley-step-fraction",
-                "0.05",
+                "--batch-size",
+                "11",
+                "--initial-design-size",
+                "13",
+                "--portfolio-size",
+                "2",
+                "--region-initial-radius-fraction",
+                "0.2",
+                "--local-refinement-max-evaluations",
+                "21",
             ]
         )
 
-        self.assertFalse(args.exploitation_valley_tracking_enabled)
-        self.assertEqual(args.exploitation_valley_probe_evaluations, 3)
-        self.assertAlmostEqual(args.exploitation_valley_step_fraction, 0.05)
+        self.assertEqual(args.batch_size, 11)
+        self.assertEqual(args.initial_design_size, 13)
+        self.assertEqual(args.portfolio_size, 2)
+        self.assertAlmostEqual(args.region_initial_radius_fraction, 0.2)
+        self.assertEqual(args.local_refinement_max_evaluations, 21)
+
+    def test_agsls_command_is_removed(self) -> None:
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["agsls", "--objective", "sphere", "--budget", "100"])
+
 
 if __name__ == "__main__":
     unittest.main()
