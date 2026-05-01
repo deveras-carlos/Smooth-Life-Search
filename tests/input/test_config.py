@@ -8,7 +8,7 @@ from pathlib import Path
 
 from smooth_life_search import PointCloudSearchConfig
 from smooth_life_search.input import load_config_file, merge_config_overrides
-from smooth_life_search.input.cli import build_parser
+from smooth_life_search.input.cli import _build_configs, build_parser
 
 
 class TestConfigLoading(unittest.TestCase):
@@ -53,10 +53,16 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(args.local_refinement_max_evaluations, defaults.local_refinement_max_evaluations)
         self.assertEqual(args.early_stop_enabled, defaults.early_stop_enabled)
         self.assertEqual(args.early_stop_value, defaults.early_stop_value)
+        self.assertIsNone(args.target_value)
         self.assertEqual(args.region_stall_patience, defaults.region_stall_patience)
         self.assertEqual(args.region_cooldown_batches, defaults.region_cooldown_batches)
         self.assertEqual(args.global_exploration_floor, defaults.global_exploration_floor)
         self.assertEqual(args.region_stencil_fraction, defaults.region_stencil_fraction)
+        self.assertEqual(args.anisotropic_regions_enabled, defaults.anisotropic_regions_enabled)
+        self.assertEqual(args.region_anisotropy_max, defaults.region_anisotropy_max)
+        self.assertEqual(args.region_geometry_min_samples, defaults.region_geometry_min_samples)
+        self.assertEqual(args.local_refinement_method, defaults.local_refinement_method)
+        self.assertEqual(args.local_refinement_damping, defaults.local_refinement_damping)
 
     def test_cli_can_disable_point_cloud_features(self) -> None:
         args = build_parser().parse_args(
@@ -67,12 +73,14 @@ class TestConfigLoading(unittest.TestCase):
                 "--budget",
                 "100",
                 "--no-trust-regions",
+                "--no-anisotropic-regions",
                 "--no-surrogate",
                 "--no-local-refinement",
             ]
         )
 
         self.assertFalse(args.trust_regions_enabled)
+        self.assertFalse(args.anisotropic_regions_enabled)
         self.assertFalse(args.surrogate_enabled)
         self.assertFalse(args.local_refinement_enabled)
 
@@ -95,6 +103,8 @@ class TestConfigLoading(unittest.TestCase):
                 "--early-stop-enabled",
                 "--early-stop-value",
                 "0.001",
+                "--target-value",
+                "0.0001",
                 "--region-stall-patience",
                 "5",
                 "--region-cooldown-batches",
@@ -103,8 +113,16 @@ class TestConfigLoading(unittest.TestCase):
                 "0.2",
                 "--region-stencil-fraction",
                 "0.5",
+                "--region-anisotropy-max",
+                "7",
+                "--region-geometry-min-samples",
+                "9",
                 "--local-refinement-max-evaluations",
                 "21",
+                "--local-refinement-method",
+                "levenberg-marquardt",
+                "--local-refinement-damping",
+                "1e-4",
             ]
         )
 
@@ -114,11 +132,34 @@ class TestConfigLoading(unittest.TestCase):
         self.assertAlmostEqual(args.region_initial_radius_fraction, 0.2)
         self.assertTrue(args.early_stop_enabled)
         self.assertAlmostEqual(args.early_stop_value, 0.001)
+        self.assertAlmostEqual(args.target_value, 0.0001)
         self.assertEqual(args.region_stall_patience, 5)
         self.assertEqual(args.region_cooldown_batches, 6)
         self.assertAlmostEqual(args.global_exploration_floor, 0.2)
         self.assertAlmostEqual(args.region_stencil_fraction, 0.5)
+        self.assertAlmostEqual(args.region_anisotropy_max, 7.0)
+        self.assertEqual(args.region_geometry_min_samples, 9)
         self.assertEqual(args.local_refinement_max_evaluations, 21)
+        self.assertEqual(args.local_refinement_method, "levenberg-marquardt")
+        self.assertAlmostEqual(args.local_refinement_damping, 1e-4)
+
+    def test_target_value_enables_early_stop_in_point_cloud_config(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "point-cloud",
+                "--objective",
+                "sphere",
+                "--budget",
+                "100",
+                "--target-value",
+                "1e-9",
+            ]
+        )
+
+        _bounds, _smoothlife, point_cloud = _build_configs(args)
+
+        self.assertTrue(point_cloud.early_stop_enabled)
+        self.assertAlmostEqual(point_cloud.early_stop_value, 1e-9)
 
     def test_agsls_command_is_removed(self) -> None:
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):

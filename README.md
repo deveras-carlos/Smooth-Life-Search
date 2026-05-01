@@ -3,16 +3,16 @@
 Smooth-Life-Search is a small Python package for 2D SmoothLife-inspired simulation and archive-centered optimization.
 
 - `SmoothLifeSearch` is the literal dense SmoothLife-style simulator. It keeps field evolution, disk/ring neighborhoods, lazy objective evaluation, objective-aware transition dynamics, and optional guided objective support.
-- `PointCloudSmoothLifeSearch` is the optimizer. It keeps a persistent archive of evaluated points, derives temporary SmoothLife-style density views from that archive, and proposes new candidates from global low-discrepancy samples, density samples, adaptive trust regions, local quadratic surrogates, region stencils, and incumbent-centered refinement probes.
+- `PointCloudSmoothLifeSearch` is the optimizer. It keeps a persistent archive of evaluated points, derives temporary SmoothLife-style density views from that archive, and proposes new candidates from global low-discrepancy samples, density samples, anisotropic adaptive trust regions, local quadratic surrogates, rotated/axis stencils, pattern probes, and incumbent-centered refinement probes.
 
 ## What It Implements
 
 - Literal 2D SmoothLife-style state evolution with disk and ring neighborhoods.
 - Objective-aware transition dynamics for dense SmoothLife simulation.
 - Archive-first point-cloud optimization where every objective evaluation is stored once.
-- Adaptive proposal-region portfolios with radius expansion/shrink feedback, stall cooldown, and active/sleeping diagnostics.
+- Adaptive proposal-region portfolios with radius expansion/shrink feedback, stall cooldown, archive-derived anisotropic geometry, and active/sleeping diagnostics.
 - Derived SmoothLife-style density grids for candidate proposal and visualization.
-- Quadratic local surrogate candidates and finite-difference local refinement.
+- Quadratic local surrogate candidates, derivative-free pattern probes, and hybrid BFGS/Levenberg-Marquardt local refinement.
 - GIF animation export for simulation and point-cloud search trajectories.
 - Built-in benchmark objectives and repeated seeded benchmark runs.
 - CLI/config/objective ingestion for JSON/TOML config files, Python-callable objectives, and CSV sampled-surface objectives.
@@ -71,9 +71,16 @@ Use `--json` on any subcommand for machine-readable output.
 
 Point-cloud trust regions are enabled by default. Disable region candidate batches with `--no-trust-regions`, disable local surrogates with `--no-surrogate`, or tune the portfolio with `--portfolio-size`, `--region-initial-radius-fraction`, `--region-expand-factor`, `--region-shrink-factor`, `--region-stall-patience`, and `--region-cooldown-batches`.
 
-Disable finite-difference incumbent refinement with `--no-local-refinement`, or tune it with `--local-refinement-start-evaluations`, `--local-refinement-max-evaluations`, and `--local-refinement-step-fraction`.
+Anisotropic proposal regions are enabled by default. Disable rotated archive-derived region geometry with `--no-anisotropic-regions`, or tune it with `--region-anisotropy-max` and `--region-geometry-min-samples`.
 
-By default, local refinement can report a local stall but does not stop the whole point-cloud run. Use `--early-stop-enabled --early-stop-value VALUE` when you want an explicit objective threshold to end a run early.
+Disable finite-difference incumbent refinement with `--no-local-refinement`, or tune it with `--local-refinement-start-evaluations`, `--local-refinement-max-evaluations`, `--local-refinement-step-fraction`, `--local-refinement-method`, and `--local-refinement-damping`.
+
+By default, local refinement can report a local stall but does not stop the whole point-cloud run; default optimization runs spend the requested budget for stronger global-search diagnostics. Use `--target-value VALUE` when you only need a run to stop once it reaches an explicit objective threshold. The longer form `--early-stop-enabled --early-stop-value VALUE` is still supported.
+
+```bash
+smooth-life-search point-cloud --objective rosenbrock --budget 20000 --target-value 1e-11
+smooth-life-search point-cloud --objective rosenbrock --budget 20000 --no-local-refinement --target-value 1e-11
+```
 
 ## Quick Start From Python
 

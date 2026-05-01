@@ -40,15 +40,34 @@ class TestPointCloudRegressionSmoke(unittest.TestCase):
         self.assertEqual(payload["best_value"], 0.0)
         self.assertEqual(payload["best_point"], [0.0, 0.0])
 
-    def test_rosenbrock_seed7_30000_reaches_precision_target(self) -> None:
-        payload = _run_cli_case("rosenbrock", 30000, ["--early-stop-enabled", "--early-stop-value", "1e-11"])
+    def test_rosenbrock_seed7_target_value_stops_after_local_refinement(self) -> None:
+        payload = _run_cli_case("rosenbrock", 20000, ["--target-value", "1e-11"])
 
         self.assertLess(payload["best_value"], 1e-11)
+        self.assertLess(payload["evaluations"], 200)
+        self.assertEqual(payload["stop_reason"], "early_stop_value")
+        self.assertAlmostEqual(payload["target_value"], 1e-11)
         self.assertTrue(payload["trust_region_events"])
         self.assertGreater(
             sum(int(event.get("trust_region_improvements", 0)) for event in payload["trust_region_events"]),
             0,
         )
+
+    def test_rosenbrock_seed7_target_value_stops_cloud_only_run(self) -> None:
+        payload = _run_cli_case("rosenbrock", 20000, ["--no-local-refinement", "--target-value", "1e-11"])
+
+        self.assertLess(payload["best_value"], 1e-11)
+        self.assertLess(payload["evaluations"], 8000)
+        self.assertEqual(payload["stop_reason"], "early_stop_value")
+        self.assertAlmostEqual(payload["target_value"], 1e-11)
+
+    def test_rosenbrock_seed7_default_run_exhausts_budget(self) -> None:
+        payload = _run_cli_case("rosenbrock", 20000)
+
+        self.assertLess(payload["best_value"], 1e-11)
+        self.assertEqual(payload["evaluations"], 20000)
+        self.assertEqual(payload["stop_reason"], "budget_exhausted")
+        self.assertIsNone(payload["target_value"])
 
     def test_no_trust_regions_disables_region_event_path(self) -> None:
         payload = _run_cli_case("rosenbrock", 6400, ["--no-trust-regions", "--early-stop-enabled", "--early-stop-value", "1e-2"])

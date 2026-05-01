@@ -12,6 +12,7 @@ from ..core import SearchRun, normalize_bounds_2d
 from ..smoothlife.config import SmoothLifeConfig
 from .archive import PointCloudArchive
 from .config import PointCloudSearchConfig
+from .geometry import RegionGeometry, fit_region_geometry
 from .models import PointCloudBatchEvent, PointCloudRegion, PointCloudRegionEvent, PointCloudSnapshot
 from .surrogate import QuadraticSurrogate, fit_quadratic_surrogate
 
@@ -53,6 +54,7 @@ class PointCloudSmoothLifeSearch:
         self._stop_reason = "not_started"
         self._global_sequence_index = 0
         self._stencil_step_fraction = float(self.config.region_initial_radius_fraction)
+        self._last_successful_step = np.zeros(2, dtype=float)
         self.reset()
 
     def reset(self, seed: int | None = None) -> None:
@@ -77,6 +79,7 @@ class PointCloudSmoothLifeSearch:
         self._stop_reason = "not_started"
         self._global_sequence_index = 0
         self._stencil_step_fraction = float(self.config.region_initial_radius_fraction)
+        self._last_successful_step = np.zeros(2, dtype=float)
         self._last_density = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_objective_field = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_evaluated_mask = np.zeros(self.config.density_grid_shape, dtype=bool)
@@ -124,8 +127,10 @@ class PointCloudSmoothLifeSearch:
             return value, False, False
         improved = self._is_better(value, self.best_value)
         if improved:
+            previous_best = self.best_point.copy()
             self.best_point = clipped.copy()
             self.best_value = value
+            self._last_successful_step = clipped - previous_best
             self._local_refinement_stalled = False
         if self._is_better(value, self.local_best_value):
             self.local_best_point = clipped.copy()
@@ -174,6 +179,14 @@ class PointCloudSmoothLifeSearch:
             diagnostics={
                 "improvements": int(improvements),
                 "source_improvements": dict(source_improvements),
+                "rotated_stencil_improvements": int(
+                    sum(count for source, count in source_improvements.items() if source.endswith(":rotated_stencil"))
+                ),
+                "pattern_improvements": int(source_improvements.get("exploit_pattern", 0)),
+                "surrogate_improvements": int(
+                    source_improvements.get("exploit_surrogate", 0)
+                    + sum(count for source, count in source_improvements.items() if source.endswith(":surrogate"))
+                ),
                 "archive_size": int(after),
             },
         )
@@ -387,7 +400,71 @@ class PointCloudSmoothLifeSearch:
                 )
                 self._next_region_id += 1
                 new_regions.append(region)
-        self.regions = new_regions
+        self.regions = self._with_region_geometries(new_regions, points, values)
+
+    def _with_region_geometries(
+        self,
+        regions: list[PointCloudRegion],
+        points: np.ndarray,
+        values: np.ndarray,
+    ) -> list[PointCloudRegion]:
+        if not regions:
+            return []
+        fitted: list[PointCloudRegion] = []
+        for region in regions:
+            if self.config.anisotropic_regions_enabled:
+                geometry = fit_region_geometry(
+                    points,
+                    values,
+                    bounds=self.original_bounds,
+                    center=region.center,
+                    radius_fraction=region.radius_fraction,
+                    maximize=self.smoothlife_config.maximize,
+                    min_samples=self.config.region_geometry_min_samples,
+                    anisotropy_max=self.config.region_anisotropy_max,
+                )
+            else:
+                geometry = RegionGeometry.identity("disabled")
+            fitted.append(self._replace_region_geometry(region, geometry))
+        return fitted
+
+    @staticmethod
+    def _replace_region_geometry(region: PointCloudRegion, geometry: RegionGeometry) -> PointCloudRegion:
+        return replace(
+            region,
+            geometry_basis=np.asarray(geometry.basis, dtype=float).copy(),
+            geometry_axis_scales=np.asarray(geometry.axis_scales, dtype=float).copy(),
+            geometry_eigenvalues=np.asarray(geometry.eigenvalues, dtype=float).copy(),
+            geometry_anisotropy=float(geometry.anisotropy),
+            geometry_sample_count=int(geometry.sample_count),
+            geometry_reason=geometry.reason,
+        )
+
+    def _fit_point_geometry(self, center: np.ndarray, radius_fraction: float) -> RegionGeometry:
+        if not self.config.anisotropic_regions_enabled:
+            return RegionGeometry.identity("disabled")
+        points, values = self.archive.arrays()
+        return fit_region_geometry(
+            points,
+            values,
+            bounds=self.original_bounds,
+            center=center,
+            radius_fraction=radius_fraction,
+            maximize=self.smoothlife_config.maximize,
+            min_samples=self.config.region_geometry_min_samples,
+            anisotropy_max=self.config.region_anisotropy_max,
+        )
+
+    @staticmethod
+    def _region_geometry(region: PointCloudRegion) -> RegionGeometry:
+        return RegionGeometry(
+            basis=np.asarray(region.geometry_basis, dtype=float),
+            axis_scales=np.asarray(region.geometry_axis_scales, dtype=float),
+            eigenvalues=np.asarray(region.geometry_eigenvalues, dtype=float),
+            anisotropy=float(region.geometry_anisotropy),
+            sample_count=int(region.geometry_sample_count),
+            reason=region.geometry_reason,
+        )
 
     def _active_regions(self) -> list[PointCloudRegion]:
         return [region for region in self.regions if int(region.cooldown_until) <= int(self._batch_index)]
@@ -487,6 +564,64 @@ class PointCloudSmoothLifeSearch:
         ]
         return [self._clip_point(center + direction * step) for direction in directions]
 
+    def _normalized_point(self, point: np.ndarray) -> np.ndarray:
+        widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
+        return (np.asarray(point, dtype=float) - self.original_bounds[:, 0]) / widths
+
+    def _point_from_normalized(self, normalized: np.ndarray) -> np.ndarray:
+        widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
+        point = self.original_bounds[:, 0] + np.asarray(normalized, dtype=float) * widths
+        return self._clip_point(point)
+
+    def _rotated_stencil_points(
+        self,
+        center: np.ndarray,
+        geometry: RegionGeometry,
+        step_fraction: float,
+    ) -> list[np.ndarray]:
+        directions = [
+            np.asarray([1.0, 0.0]),
+            np.asarray([-1.0, 0.0]),
+            np.asarray([0.0, 1.0]),
+            np.asarray([0.0, -1.0]),
+            np.asarray([1.0, 1.0]),
+            np.asarray([-1.0, -1.0]),
+            np.asarray([1.0, -1.0]),
+            np.asarray([-1.0, 1.0]),
+        ]
+        normalized_center = self._normalized_point(center)
+        basis = np.asarray(geometry.basis, dtype=float)
+        axis_steps = max(float(step_fraction), float(self.config.region_min_radius_fraction)) * np.asarray(
+            geometry.axis_scales,
+            dtype=float,
+        )
+        points: list[np.ndarray] = []
+        for direction in directions:
+            offset = basis @ (direction * axis_steps)
+            points.append(self._point_from_normalized(normalized_center + offset))
+        return points
+
+    def _anisotropic_random_points(
+        self,
+        center: np.ndarray,
+        geometry: RegionGeometry,
+        radius_fraction: float,
+        count: int,
+    ) -> np.ndarray:
+        if count <= 0:
+            return np.empty((0, 2), dtype=float)
+        normalized_center = self._normalized_point(center)
+        basis = np.asarray(geometry.basis, dtype=float)
+        axis_lengths = max(float(radius_fraction), float(self.config.region_min_radius_fraction)) * np.asarray(
+            geometry.axis_scales,
+            dtype=float,
+        )
+        angles = self.rng.uniform(0.0, 2.0 * np.pi, size=count)
+        radii = np.sqrt(self.rng.random(count))
+        local = np.column_stack((np.cos(angles), np.sin(angles))) * radii[:, None] * axis_lengths
+        normalized_points = normalized_center + local @ basis.T
+        return np.asarray([self._point_from_normalized(point) for point in normalized_points], dtype=float)
+
     def _region_candidates(self, count: int) -> list[tuple[np.ndarray, str]]:
         active_regions = self._active_regions()
         if count <= 0 or not active_regions:
@@ -498,12 +633,29 @@ class PointCloudSmoothLifeSearch:
             lower = region_bounds[:, 0]
             upper = region_bounds[:, 1]
             widths = upper - lower
+            geometry = self._region_geometry(region)
             stencil_count = min(per_region, int(np.ceil(per_region * float(self.config.region_stencil_fraction))))
-            step = np.maximum(widths * 0.25, (self.original_bounds[:, 1] - self.original_bounds[:, 0]) * float(self.config.region_min_radius_fraction))
-            for point in self._stencil_points(region.center, step)[:stencil_count]:
-                candidates.append((point, f"region:{region.region_id}:stencil"))
+            step_fraction = max(float(region.radius_fraction) * 0.50, float(self.config.region_min_radius_fraction))
+            step = np.maximum(
+                widths * 0.25,
+                (self.original_bounds[:, 1] - self.original_bounds[:, 0])
+                * float(self.config.region_min_radius_fraction),
+            )
+            stencil_candidates: list[tuple[np.ndarray, str]] = []
+            if self.config.anisotropic_regions_enabled and geometry.reason != "disabled":
+                for point in self._rotated_stencil_points(region.center, geometry, step_fraction)[:stencil_count]:
+                    stencil_candidates.append((point, f"region:{region.region_id}:rotated_stencil"))
+                for point in self._stencil_points(region.center, step):
+                    stencil_candidates.append((point, f"region:{region.region_id}:stencil"))
+            else:
+                for point in self._stencil_points(region.center, step)[:stencil_count]:
+                    stencil_candidates.append((point, f"region:{region.region_id}:stencil"))
+            candidates.extend(stencil_candidates[:stencil_count])
             random_needed = max(1, per_region - stencil_count - 2)
-            points = lower + self.rng.random((random_needed, 2)) * (upper - lower)
+            if self.config.anisotropic_regions_enabled and geometry.reason == "archive_covariance":
+                points = self._anisotropic_random_points(region.center, geometry, region.radius_fraction, random_needed)
+            else:
+                points = lower + self.rng.random((random_needed, 2)) * (upper - lower)
             candidates.extend((point, f"region:{region.region_id}:random") for point in points)
             if self.config.surrogate_enabled:
                 surrogate = self._fit_region_surrogate(region)
@@ -525,14 +677,29 @@ class PointCloudSmoothLifeSearch:
             float(self.config.region_min_radius_fraction),
             min(float(self.config.local_refinement_step_fraction), max(float(distances[0]) if distances.size else 0.05, scheduled)),
         )
+        if self.config.surrogate_enabled:
+            surrogate = self._fit_point_surrogate(self.best_point, max(local_scale, float(self.config.region_initial_radius_fraction)))
+            if surrogate.accepted and surrogate.point is not None:
+                candidates.append((surrogate.point.copy(), "exploit_surrogate"))
+                if len(candidates) >= count:
+                    return candidates
+        if np.linalg.norm(self._last_successful_step / widths) > float(self.config.region_min_radius_fraction):
+            candidates.append((self._clip_point(self.best_point + self._last_successful_step), "exploit_pattern"))
+            if len(candidates) >= count:
+                return candidates
+            candidates.append((self._clip_point(self.best_point + 2.0 * self._last_successful_step), "exploit_pattern"))
+            if len(candidates) >= count:
+                return candidates
         step = np.maximum(local_scale * widths, 1e-9 * widths)
-        for point in self._stencil_points(self.best_point, step):
-            candidates.append((point, "exploit_stencil"))
+        stencil_candidates = [(point, "exploit_stencil") for point in self._stencil_points(self.best_point, step)]
+        for point, source in stencil_candidates:
+            candidates.append((point, source))
             if len(candidates) >= count:
                 return candidates
         while len(candidates) < count:
             point = self.best_point + self.rng.normal(0.0, step, size=2)
-            candidates.append((self._clip_point(point), "exploit"))
+            point = self._clip_point(point)
+            candidates.append((point, "exploit"))
         return candidates
 
     def _fit_region_surrogate(self, region: PointCloudRegion) -> QuadraticSurrogate:
@@ -542,6 +709,25 @@ class PointCloudSmoothLifeSearch:
             values,
             region_bounds=region.bounds(self.original_bounds),
             center=region.center,
+            maximize=self.smoothlife_config.maximize,
+            min_samples=self.config.surrogate_min_samples,
+            max_samples=self.config.surrogate_max_samples,
+            regularization=self.config.surrogate_regularization,
+            max_condition=self.config.surrogate_max_condition,
+        )
+
+    def _fit_point_surrogate(self, center: np.ndarray, radius_fraction: float) -> QuadraticSurrogate:
+        widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
+        radius = max(float(radius_fraction), float(self.config.region_min_radius_fraction)) * widths
+        lower = np.maximum(self.original_bounds[:, 0], np.asarray(center, dtype=float) - radius)
+        upper = np.minimum(self.original_bounds[:, 1], np.asarray(center, dtype=float) + radius)
+        region_bounds = np.column_stack((lower, upper))
+        points, values = self.archive.arrays()
+        return fit_quadratic_surrogate(
+            points,
+            values,
+            region_bounds=region_bounds,
+            center=np.asarray(center, dtype=float),
             maximize=self.smoothlife_config.maximize,
             min_samples=self.config.surrogate_min_samples,
             max_samples=self.config.surrogate_max_samples,
@@ -581,6 +767,113 @@ class PointCloudSmoothLifeSearch:
             gradient[axis] = (self._target(plus_value) - self._target(minus_value)) / (plus[axis] - minus[axis])
         return gradient, len(self.archive) - spent_before
 
+    def _finite_difference_hessian(self, point: np.ndarray, value: float) -> tuple[np.ndarray | None, int]:
+        if self._remaining() <= 0:
+            return None, 0
+        widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
+        steps = np.asarray(
+            [
+                max(2e-5 * widths[axis], 1e-7 * max(abs(float(point[axis])), 1.0))
+                for axis in range(2)
+            ],
+            dtype=float,
+        )
+        spent_before = len(self.archive)
+        f0 = self._target(value)
+        hessian = np.zeros((2, 2), dtype=float)
+        axis_values: list[tuple[float, float, float]] = []
+        for axis in range(2):
+            plus = point.copy()
+            minus = point.copy()
+            plus[axis] = min(self.original_bounds[axis, 1], plus[axis] + steps[axis])
+            minus[axis] = max(self.original_bounds[axis, 0], minus[axis] - steps[axis])
+            if plus[axis] == point[axis] or minus[axis] == point[axis] or plus[axis] == minus[axis]:
+                return None, len(self.archive) - spent_before
+            plus_value, _plus_added, _plus_improved = self._evaluate_point(plus, source="local_hessian")
+            minus_value, _minus_added, _minus_improved = self._evaluate_point(minus, source="local_hessian")
+            if plus_value is None or minus_value is None:
+                return None, len(self.archive) - spent_before
+            plus_target = self._target(plus_value)
+            minus_target = self._target(minus_value)
+            hessian[axis, axis] = (plus_target - 2.0 * f0 + minus_target) / (steps[axis] * steps[axis])
+            axis_values.append((plus_target, minus_target, steps[axis]))
+        corner_targets: list[float] = []
+        for sx, sy in ((1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)):
+            corner = point.copy()
+            corner[0] = np.clip(corner[0] + sx * steps[0], self.original_bounds[0, 0], self.original_bounds[0, 1])
+            corner[1] = np.clip(corner[1] + sy * steps[1], self.original_bounds[1, 0], self.original_bounds[1, 1])
+            if np.any(corner == point):
+                return None, len(self.archive) - spent_before
+            corner_value, _corner_added, _corner_improved = self._evaluate_point(corner, source="local_hessian")
+            if corner_value is None:
+                return None, len(self.archive) - spent_before
+            corner_targets.append(self._target(corner_value))
+        cross = (corner_targets[0] - corner_targets[1] - corner_targets[2] + corner_targets[3]) / (
+            4.0 * axis_values[0][2] * axis_values[1][2]
+        )
+        hessian[0, 1] = cross
+        hessian[1, 0] = cross
+        if not np.all(np.isfinite(hessian)):
+            return None, len(self.archive) - spent_before
+        return 0.5 * (hessian + hessian.T), len(self.archive) - spent_before
+
+    @staticmethod
+    def _damped_newton_direction(
+        gradient: np.ndarray,
+        hessian: np.ndarray,
+        damping: float,
+    ) -> np.ndarray | None:
+        try:
+            eigenvalues = np.linalg.eigvalsh(hessian)
+        except np.linalg.LinAlgError:
+            return None
+        if not np.all(np.isfinite(eigenvalues)):
+            return None
+        shift = max(float(damping), -float(np.min(eigenvalues)) + float(damping))
+        try:
+            direction = -np.linalg.solve(hessian + shift * np.eye(2, dtype=float), gradient)
+        except np.linalg.LinAlgError:
+            return None
+        if not np.all(np.isfinite(direction)) or float(np.dot(direction, gradient)) >= 0.0:
+            return None
+        return direction
+
+    def _line_search_refinement(
+        self,
+        point: np.ndarray,
+        value: float,
+        gradient: np.ndarray,
+        direction: np.ndarray,
+        *,
+        before: int,
+        max_new: int,
+    ) -> tuple[bool, np.ndarray, float, bool]:
+        accepted = False
+        alpha = 1.0
+        accepted_point = point.copy()
+        accepted_value = value
+        accepted_improved = False
+        directional = float(np.dot(gradient, direction))
+        for _ in range(32):
+            if self._remaining() <= 0 or len(self.archive) - before >= max_new:
+                break
+            candidate = self._clip_point(point + alpha * direction)
+            candidate_value, _added, improved = self._evaluate_point(candidate, source="local_refinement")
+            if candidate_value is None:
+                break
+            candidate_target = self._target(candidate_value)
+            current_target = self._target(value)
+            if candidate_target <= current_target + 1e-4 * alpha * directional or candidate_target < current_target:
+                accepted = True
+                accepted_point = candidate
+                accepted_value = float(candidate_value)
+                accepted_improved = bool(improved)
+                break
+            alpha *= 0.5
+            if alpha < 1e-12:
+                break
+        return accepted, accepted_point, accepted_value, accepted_improved
+
     def _run_local_refinement(self) -> PointCloudBatchEvent | None:
         if not self.config.local_refinement_enabled or len(self.archive) < int(self.config.local_refinement_start_evaluations):
             return None
@@ -596,6 +889,16 @@ class PointCloudSmoothLifeSearch:
         if gradient is None:
             return None
         improvements = 0
+        lm_attempts = 0
+        lm_accepted = 0
+        bfgs_steps = 0
+        gradient_fallbacks = 0
+        hessian_failures = 0
+        damping_increases = 0
+        damping_decreases = 0
+        fallback_count = 0
+        damping = float(self.config.local_refinement_damping)
+        method = self.config.local_refinement_method
         gradient_norm = float(np.linalg.norm(gradient))
         widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
         max_step_norm = float(self.config.local_refinement_step_fraction) * float(np.linalg.norm(widths))
@@ -604,46 +907,89 @@ class PointCloudSmoothLifeSearch:
             if gradient_norm <= float(self.config.local_refinement_gradient_tolerance):
                 self._local_refinement_stalled = True
                 break
-            direction = -hessian_inverse @ gradient
+            direction: np.ndarray | None = None
+            direction_method = "bfgs"
+            use_lm = method == "levenberg-marquardt" or (
+                method == "hybrid"
+                and gradient_norm <= 1e-4
+                and len(self.archive) - before >= 16
+            )
+            if use_lm and len(self.archive) - before < max_new:
+                lm_attempts += 1
+                hessian, _spent = self._finite_difference_hessian(point, value)
+                if hessian is None:
+                    hessian_failures += 1
+                else:
+                    direction = self._damped_newton_direction(gradient, hessian, damping)
+                    if direction is None:
+                        hessian_failures += 1
+                    else:
+                        direction_method = "levenberg_marquardt"
+            if direction is None:
+                if method == "levenberg-marquardt":
+                    fallback_count += 1
+                direction = -hessian_inverse @ gradient
+                direction_method = "bfgs"
             if not np.all(np.isfinite(direction)) or float(np.dot(direction, gradient)) >= 0.0:
                 hessian_inverse = np.eye(2, dtype=float)
                 direction = -gradient
+                direction_method = "gradient"
+                gradient_fallbacks += 1
             norm = float(np.linalg.norm(direction))
             if norm <= 1e-14:
                 self._local_refinement_stalled = True
                 break
             if norm > max_step_norm:
                 direction = direction * (max_step_norm / norm)
-            accepted = False
-            alpha = 1.0
-            accepted_point = point.copy()
-            accepted_value = value
-            directional = float(np.dot(gradient, direction))
-            for _ in range(32):
-                if self._remaining() <= 0 or len(self.archive) - before >= max_new:
-                    break
-                candidate = self._clip_point(point + alpha * direction)
-                candidate_value, _added, improved = self._evaluate_point(candidate, source="local_refinement")
-                if candidate_value is None:
-                    break
-                candidate_target = self._target(candidate_value)
-                current_target = self._target(value)
-                if candidate_target <= current_target + 1e-4 * alpha * directional or candidate_target < current_target:
-                    accepted = True
-                    accepted_point = candidate
-                    accepted_value = float(candidate_value)
-                    if improved:
-                        improvements += 1
-                    break
-                alpha *= 0.5
-                if alpha < 1e-12:
-                    break
+            accepted, accepted_point, accepted_value, accepted_improved = self._line_search_refinement(
+                point,
+                value,
+                gradient,
+                direction,
+                before=before,
+                max_new=max_new,
+            )
+            if not accepted and direction_method == "levenberg_marquardt":
+                damping = min(damping * 10.0, 1e12)
+                damping_increases += 1
+                if method == "hybrid":
+                    fallback_count += 1
+                    direction = -hessian_inverse @ gradient
+                    direction_method = "bfgs"
+                    if not np.all(np.isfinite(direction)) or float(np.dot(direction, gradient)) >= 0.0:
+                        hessian_inverse = np.eye(2, dtype=float)
+                        direction = -gradient
+                        direction_method = "gradient"
+                        gradient_fallbacks += 1
+                    norm = float(np.linalg.norm(direction))
+                    if norm > max_step_norm:
+                        direction = direction * (max_step_norm / norm)
+                    accepted, accepted_point, accepted_value, accepted_improved = self._line_search_refinement(
+                        point,
+                        value,
+                        gradient,
+                        direction,
+                        before=before,
+                        max_new=max_new,
+                    )
+            if accepted_improved:
+                improvements += 1
             if not accepted:
                 hessian_inverse = np.eye(2, dtype=float)
                 gradient, _spent = self._finite_difference_gradient(point)
                 if gradient is None:
                     break
                 continue
+            if direction_method == "levenberg_marquardt":
+                lm_accepted += 1
+                damping = max(float(self.config.local_refinement_damping) * 1e-6, damping * 0.3)
+                damping_decreases += 1
+            else:
+                bfgs_steps += 1
+            if self._early_stop_reached():
+                point = accepted_point
+                value = accepted_value
+                break
             next_gradient, _spent = self._finite_difference_gradient(accepted_point)
             if next_gradient is None:
                 point = accepted_point
@@ -669,16 +1015,14 @@ class PointCloudSmoothLifeSearch:
         after = len(self.archive)
         if after == before:
             return None
+        source_counts = Counter(sample.source for sample in self.archive.samples[before:])
         event = PointCloudBatchEvent(
             batch_index=self._batch_index,
             kind="local_refinement",
             evaluations_before=before,
             evaluations_after=after,
             candidate_count=after - before,
-            source_counts={
-                "local_gradient": sum(1 for sample in self.archive.samples[before:] if sample.source == "local_gradient"),
-                "local_refinement": sum(1 for sample in self.archive.samples[before:] if sample.source == "local_refinement"),
-            },
+            source_counts=dict(source_counts),
             best_before=best_before,
             best_after=float(self.best_value),
             best_point=self.best_point.copy(),
@@ -687,6 +1031,16 @@ class PointCloudSmoothLifeSearch:
                 "improvements": int(improvements),
                 "gradient_norm": float(gradient_norm),
                 "local_refinement_stalled": bool(self._local_refinement_stalled),
+                "local_refinement_method": method,
+                "lm_attempts": int(lm_attempts),
+                "lm_accepted_steps": int(lm_accepted),
+                "bfgs_steps": int(bfgs_steps),
+                "gradient_fallbacks": int(gradient_fallbacks),
+                "hessian_failures": int(hessian_failures),
+                "damping_final": float(damping),
+                "damping_increases": int(damping_increases),
+                "damping_decreases": int(damping_decreases),
+                "fallback_count": int(fallback_count),
                 "archive_size": int(after),
             },
         )
@@ -700,10 +1054,13 @@ class PointCloudSmoothLifeSearch:
                     "evaluations_before": int(before),
                     "evaluations_after": int(after),
                     "best_before": float(best_before),
-                "best_after": float(self.best_value),
-                "local_refinement_stalled": bool(self._local_refinement_stalled),
-            }
-        )
+                    "best_after": float(self.best_value),
+                    "local_refinement_stalled": bool(self._local_refinement_stalled),
+                    "local_refinement_method": method,
+                    "lm_accepted_steps": int(lm_accepted),
+                    "fallback_count": int(fallback_count),
+                }
+            )
         return event
 
     def _run_stencil_refinement(self) -> PointCloudBatchEvent | None:
@@ -721,19 +1078,52 @@ class PointCloudSmoothLifeSearch:
         while len(self.archive) - before < max_new and self._remaining() > 0:
             step = np.maximum(self._stencil_step_fraction * widths, min_step * widths)
             improved_this_round = False
-            for point in self._stencil_points(self.best_point, step):
+            if self.config.surrogate_enabled:
+                surrogate = self._fit_point_surrogate(self.best_point, max(self._stencil_step_fraction, max_step))
+                if surrogate.accepted and surrogate.point is not None:
+                    _value, added, improved = self._evaluate_point(surrogate.point, source="exploit_surrogate")
+                    if added:
+                        source_counts["exploit_surrogate"] += 1
+                        if improved:
+                            improvements += 1
+                            source_improvements["exploit_surrogate"] += 1
+                            improved_this_round = True
+                    if len(self.archive) - before >= max_new or self._remaining() <= 0:
+                        break
+            stencil_candidates = [(point, "exploit_stencil") for point in self._stencil_points(self.best_point, step)]
+            for point, source in stencil_candidates:
                 if len(self.archive) - before >= max_new or self._remaining() <= 0:
                     break
-                _value, added, improved = self._evaluate_point(point, source="exploit_stencil")
+                previous_best = self.best_point.copy()
+                _value, added, improved = self._evaluate_point(point, source=source)
                 if not added:
                     continue
-                source_counts["exploit_stencil"] += 1
+                source_counts[source] += 1
                 if improved:
                     improvements += 1
-                    source_improvements["exploit_stencil"] += 1
+                    source_improvements[source] += 1
                     improved_this_round = True
+                    pattern_step = self.best_point - previous_best
+                    for multiplier in (1.0, 2.0, 3.0):
+                        if len(self.archive) - before >= max_new or self._remaining() <= 0:
+                            break
+                        pattern_point = self._clip_point(self.best_point + multiplier * pattern_step)
+                        _pattern_value, pattern_added, pattern_improved = self._evaluate_point(
+                            pattern_point,
+                            source="exploit_pattern",
+                        )
+                        if not pattern_added:
+                            break
+                        source_counts["exploit_pattern"] += 1
+                        if pattern_improved:
+                            improvements += 1
+                            source_improvements["exploit_pattern"] += 1
+                            improved_this_round = True
+                            pattern_step = self._last_successful_step.copy()
+                        else:
+                            break
             if improved_this_round:
-                self._stencil_step_fraction = min(max_step, self._stencil_step_fraction * 1.15)
+                self._stencil_step_fraction = min(max_step, self._stencil_step_fraction * 1.25)
             else:
                 self._stencil_step_fraction = max(min_step, self._stencil_step_fraction * 0.5)
             if self._stencil_step_fraction <= min_step and not improved_this_round:
@@ -756,6 +1146,9 @@ class PointCloudSmoothLifeSearch:
                 "improvements": int(improvements),
                 "source_improvements": dict(source_improvements),
                 "stencil_step_fraction": float(self._stencil_step_fraction),
+                "rotated_stencil_improvements": int(source_improvements.get("exploit_rotated_stencil", 0)),
+                "pattern_improvements": int(source_improvements.get("exploit_pattern", 0)),
+                "surrogate_improvements": int(source_improvements.get("exploit_surrogate", 0)),
                 "archive_size": int(after),
             },
         )
@@ -870,7 +1263,15 @@ class PointCloudSmoothLifeSearch:
                     "initial_design_size": int(self.config.initial_design_size),
                     "portfolio_size": int(self.config.portfolio_size),
                     "trust_regions_enabled": bool(self.config.trust_regions_enabled),
+                    "anisotropic_regions_enabled": bool(self.config.anisotropic_regions_enabled),
+                    "region_anisotropy_max": float(self.config.region_anisotropy_max),
+                    "local_refinement_method": self.config.local_refinement_method,
                     "early_stop_enabled": bool(self.config.early_stop_enabled),
+                    "early_stop_value": (
+                        None
+                        if self.config.early_stop_value is None
+                        else float(self.config.early_stop_value)
+                    ),
                 },
                 "archive_size": int(len(self.archive)),
                 "portfolio": [region.to_dict() for region in self.regions],

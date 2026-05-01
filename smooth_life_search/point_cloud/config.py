@@ -35,6 +35,9 @@ class PointCloudSearchConfig:
     region_cooldown_batches: int = 4
     global_exploration_floor: float = 0.10
     region_stencil_fraction: float = 0.35
+    anisotropic_regions_enabled: bool = True
+    region_anisotropy_max: float = 25.0
+    region_geometry_min_samples: int = 8
     surrogate_enabled: bool = True
     surrogate_min_samples: int = 12
     surrogate_max_samples: int = 96
@@ -45,6 +48,8 @@ class PointCloudSearchConfig:
     local_refinement_max_evaluations: int = 512
     local_refinement_gradient_tolerance: float = 1e-7
     local_refinement_step_fraction: float = 0.10
+    local_refinement_method: str = "hybrid"
+    local_refinement_damping: float = 1e-6
     best_improvement_tolerance: float = 0.0
     snapshot_interval_batches: int = 16
 
@@ -98,6 +103,10 @@ class PointCloudSearchConfig:
             raise ValueError("global_exploration_floor must be in [0, 1]")
         if not 0.0 <= self.region_stencil_fraction <= 1.0:
             raise ValueError("region_stencil_fraction must be in [0, 1]")
+        if self.region_anisotropy_max < 1.0:
+            raise ValueError("region_anisotropy_max must be >= 1")
+        if self.region_geometry_min_samples <= 0:
+            raise ValueError("region_geometry_min_samples must be positive")
         if self.surrogate_min_samples <= 0 or self.surrogate_max_samples <= 0:
             raise ValueError("surrogate sample counts must be positive")
         if self.surrogate_max_samples < self.surrogate_min_samples:
@@ -114,6 +123,10 @@ class PointCloudSearchConfig:
             raise ValueError("local_refinement_gradient_tolerance must be non-negative")
         if not 0.0 < self.local_refinement_step_fraction <= 1.0:
             raise ValueError("local_refinement_step_fraction must be in (0, 1]")
+        if self.local_refinement_method not in {"bfgs", "levenberg-marquardt", "hybrid"}:
+            raise ValueError("local_refinement_method must be bfgs, levenberg-marquardt, or hybrid")
+        if self.local_refinement_damping <= 0.0:
+            raise ValueError("local_refinement_damping must be positive")
         if self.best_improvement_tolerance < 0.0:
             raise ValueError("best_improvement_tolerance must be non-negative")
         if self.snapshot_interval_batches <= 0:

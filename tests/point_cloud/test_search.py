@@ -102,9 +102,39 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
             for event in run.metadata["batch_events"]
             for source in event["source_counts"]
         }
+        points = np.asarray([sample.point for sample in search.archive.samples], dtype=float)
 
-        self.assertTrue(any(source.startswith("region:") and source.endswith(":stencil") for source in sources))
+        self.assertTrue(any(source.startswith("region:") and "stencil" in source for source in sources))
+        self.assertTrue(any(source.startswith("region:") and source.endswith(":rotated_stencil") for source in sources))
         self.assertIn("exploit_stencil", sources)
+        self.assertTrue(np.all(points >= -5.0))
+        self.assertTrue(np.all(points <= 5.0))
+
+    def test_levenberg_marquardt_refinement_records_diagnostics(self) -> None:
+        search = PointCloudSmoothLifeSearch(
+            lambda point: float((point[0] - 1.25) ** 2 + 3.0 * (point[1] + 0.5) ** 2),
+            [(-4.0, 4.0), (-4.0, 4.0)],
+            SmoothLifeConfig(grid_shape=(32, 32), store_all_snapshots=False),
+            PointCloudSearchConfig(
+                max_evaluations=180,
+                initial_design_size=16,
+                batch_size=12,
+                density_grid_shape=(24, 24),
+                local_refinement_method="levenberg-marquardt",
+                early_stop_enabled=True,
+                early_stop_value=1e-8,
+            ),
+        )
+        search.reset(seed=6)
+        run = search.run()
+        local_events = [event for event in run.metadata["batch_events"] if event["kind"] == "local_refinement"]
+
+        self.assertLess(run.best_value, 1e-8)
+        self.assertTrue(local_events)
+        self.assertEqual(local_events[-1]["local_refinement_method"], "levenberg-marquardt")
+        self.assertGreater(local_events[-1]["lm_accepted_steps"], 0)
+        self.assertIn("damping_final", local_events[-1])
+        self.assertIn("fallback_count", local_events[-1])
 
     def test_python_api_requires_budget(self) -> None:
         search = PointCloudSmoothLifeSearch(

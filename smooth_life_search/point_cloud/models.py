@@ -40,6 +40,12 @@ class PointCloudRegion:
     failures: int = 0
     stall_count: int = 0
     cooldown_until: int = 0
+    geometry_basis: np.ndarray = field(default_factory=lambda: np.eye(2, dtype=float))
+    geometry_axis_scales: np.ndarray = field(default_factory=lambda: np.ones(2, dtype=float))
+    geometry_eigenvalues: np.ndarray = field(default_factory=lambda: np.ones(2, dtype=float))
+    geometry_anisotropy: float = 1.0
+    geometry_sample_count: int = 0
+    geometry_reason: str = "identity"
 
     def bounds(self, search_bounds: np.ndarray) -> np.ndarray:
         widths = search_bounds[:, 1] - search_bounds[:, 0]
@@ -60,6 +66,12 @@ class PointCloudRegion:
             "failures": int(self.failures),
             "stall_count": int(self.stall_count),
             "cooldown_until": int(self.cooldown_until),
+            "geometry_basis": np.asarray(self.geometry_basis, dtype=float).tolist(),
+            "geometry_axis_scales": np.asarray(self.geometry_axis_scales, dtype=float).tolist(),
+            "geometry_eigenvalues": np.asarray(self.geometry_eigenvalues, dtype=float).tolist(),
+            "geometry_anisotropy": float(self.geometry_anisotropy),
+            "geometry_sample_count": int(self.geometry_sample_count),
+            "geometry_reason": self.geometry_reason,
         }
 
 

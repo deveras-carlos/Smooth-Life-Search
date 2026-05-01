@@ -42,6 +42,12 @@ def _build_bounds(objective_name: str | None, dimension: int, lower: float | Non
 def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]], SmoothLifeConfig, PointCloudSearchConfig]:
     bounds = _build_bounds(args.objective, args.dimension, args.lower, args.upper)
     cloud_defaults = PointCloudSearchConfig()
+    target_value = getattr(args, "target_value", None)
+    early_stop_enabled = getattr(args, "early_stop_enabled", cloud_defaults.early_stop_enabled)
+    early_stop_value = getattr(args, "early_stop_value", cloud_defaults.early_stop_value)
+    if target_value is not None:
+        early_stop_enabled = True
+        early_stop_value = target_value
     smoothlife = SmoothLifeConfig(
         grid_shape=(args.grid_height, args.grid_width),
         dt=args.dt,
@@ -81,12 +87,23 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         density_candidate_fraction=getattr(args, "density_candidate_fraction", cloud_defaults.density_candidate_fraction),
         global_candidate_fraction=getattr(args, "global_candidate_fraction", cloud_defaults.global_candidate_fraction),
         exploit_candidate_fraction=getattr(args, "exploit_candidate_fraction", cloud_defaults.exploit_candidate_fraction),
-        early_stop_enabled=getattr(args, "early_stop_enabled", cloud_defaults.early_stop_enabled),
-        early_stop_value=getattr(args, "early_stop_value", cloud_defaults.early_stop_value),
+        early_stop_enabled=early_stop_enabled,
+        early_stop_value=early_stop_value,
         region_stall_patience=getattr(args, "region_stall_patience", cloud_defaults.region_stall_patience),
         region_cooldown_batches=getattr(args, "region_cooldown_batches", cloud_defaults.region_cooldown_batches),
         global_exploration_floor=getattr(args, "global_exploration_floor", cloud_defaults.global_exploration_floor),
         region_stencil_fraction=getattr(args, "region_stencil_fraction", cloud_defaults.region_stencil_fraction),
+        anisotropic_regions_enabled=getattr(
+            args,
+            "anisotropic_regions_enabled",
+            cloud_defaults.anisotropic_regions_enabled,
+        ),
+        region_anisotropy_max=getattr(args, "region_anisotropy_max", cloud_defaults.region_anisotropy_max),
+        region_geometry_min_samples=getattr(
+            args,
+            "region_geometry_min_samples",
+            cloud_defaults.region_geometry_min_samples,
+        ),
         surrogate_enabled=getattr(args, "surrogate_enabled", cloud_defaults.surrogate_enabled),
         surrogate_min_samples=getattr(args, "surrogate_min_samples", cloud_defaults.surrogate_min_samples),
         surrogate_max_samples=getattr(args, "surrogate_max_samples", cloud_defaults.surrogate_max_samples),
@@ -106,6 +123,8 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             "local_refinement_step_fraction",
             cloud_defaults.local_refinement_step_fraction,
         ),
+        local_refinement_method=getattr(args, "local_refinement_method", cloud_defaults.local_refinement_method),
+        local_refinement_damping=getattr(args, "local_refinement_damping", cloud_defaults.local_refinement_damping),
         best_improvement_tolerance=args.best_improvement_tolerance,
     )
     return bounds, smoothlife, point_cloud
@@ -166,6 +185,7 @@ def run_simulation(args: argparse.Namespace) -> dict[str, Any]:
 def run_point_cloud_command(args: argparse.Namespace) -> dict[str, Any]:
     objective = _objective_from_args(args)
     bounds, smoothlife, point_cloud = _build_configs(args)
+    target_value = point_cloud.early_stop_value if point_cloud.early_stop_enabled else None
     search = PointCloudSmoothLifeSearch(objective, bounds, smoothlife, point_cloud)
     search.reset(seed=args.seed)
     run = search.run(evaluations=args.budget)
@@ -188,6 +208,7 @@ def run_point_cloud_command(args: argparse.Namespace) -> dict[str, Any]:
         "region_events": run.metadata.get("region_events", []),
         "trust_region_events": run.metadata.get("trust_region_events", []),
         "stop_reason": run.metadata.get("stop_reason", ""),
+        "target_value": target_value,
         "local_refinement_stalled": run.metadata.get("local_refinement_stalled", False),
         "active_region_count": run.metadata.get("active_region_count", 0),
         "sleeping_region_count": run.metadata.get("sleeping_region_count", 0),
@@ -241,6 +262,8 @@ def _print_point_cloud(payload: dict[str, Any], show_batches: bool) -> None:
     print(f"active regions: {payload['active_region_count']}")
     print(f"sleeping regions: {payload['sleeping_region_count']}")
     print(f"stop reason: {payload['stop_reason']}")
+    if payload["target_value"] is not None:
+        print(f"target value: {payload['target_value']:e}")
     if show_batches:
         print("batch events:")
         for event in payload["batch_events"]:
@@ -327,10 +350,14 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--exploit-candidate-fraction", type=float, default=cloud_defaults.exploit_candidate_fraction, help="Batch fraction probing near the incumbent.")
     cloud_shared.add_argument("--early-stop-enabled", action="store_true", default=cloud_defaults.early_stop_enabled, help="Allow explicit value-threshold early stopping.")
     cloud_shared.add_argument("--early-stop-value", type=float, default=cloud_defaults.early_stop_value, help="Best objective value threshold for explicit early stopping.")
+    cloud_shared.add_argument("--target-value", type=float, default=None, help="Shorthand target that enables explicit early stopping at this best value.")
     cloud_shared.add_argument("--region-stall-patience", type=int, default=cloud_defaults.region_stall_patience, help="Failed region batches before a region cools down.")
     cloud_shared.add_argument("--region-cooldown-batches", type=int, default=cloud_defaults.region_cooldown_batches, help="Batches a stalled region sleeps before receiving candidates again.")
     cloud_shared.add_argument("--global-exploration-floor", type=float, default=cloud_defaults.global_exploration_floor, help="Fraction of density candidates reserved for global low-discrepancy exploration.")
     cloud_shared.add_argument("--region-stencil-fraction", type=float, default=cloud_defaults.region_stencil_fraction, help="Fraction of region candidates used for coordinate/cross stencils.")
+    cloud_shared.add_argument("--no-anisotropic-regions", dest="anisotropic_regions_enabled", action="store_false", default=cloud_defaults.anisotropic_regions_enabled, help="Disable archive-derived rotated region geometry.")
+    cloud_shared.add_argument("--region-anisotropy-max", type=float, default=cloud_defaults.region_anisotropy_max, help="Maximum major/minor axis ratio for anisotropic proposal regions.")
+    cloud_shared.add_argument("--region-geometry-min-samples", type=int, default=cloud_defaults.region_geometry_min_samples, help="Minimum nearby samples needed to derive anisotropic region geometry.")
     cloud_shared.add_argument("--no-surrogate", dest="surrogate_enabled", action="store_false", default=cloud_defaults.surrogate_enabled, help="Disable local quadratic surrogate region candidates.")
     cloud_shared.add_argument("--surrogate-min-samples", type=int, default=cloud_defaults.surrogate_min_samples, help="Minimum samples for local quadratic fits.")
     cloud_shared.add_argument("--surrogate-max-samples", type=int, default=cloud_defaults.surrogate_max_samples, help="Maximum samples for local quadratic fits.")
@@ -338,6 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--local-refinement-start-evaluations", type=int, default=cloud_defaults.local_refinement_start_evaluations, help="Archive size before local refinement can run.")
     cloud_shared.add_argument("--local-refinement-max-evaluations", type=int, default=cloud_defaults.local_refinement_max_evaluations, help="Maximum local-refinement evaluations per run.")
     cloud_shared.add_argument("--local-refinement-step-fraction", type=float, default=cloud_defaults.local_refinement_step_fraction, help="Maximum local-refinement step in normalized box units.")
+    cloud_shared.add_argument("--local-refinement-method", choices=("bfgs", "levenberg-marquardt", "hybrid"), default=cloud_defaults.local_refinement_method, help="Finite-difference local refinement direction strategy.")
+    cloud_shared.add_argument("--local-refinement-damping", type=float, default=cloud_defaults.local_refinement_damping, help="Initial damping used by Levenberg-Marquardt local refinement.")
 
     point_cloud = subparsers.add_parser("point-cloud", parents=[shared, cloud_shared], help="Run point-cloud SmoothLife optimization.")
     point_cloud.add_argument("--show-batches", action="store_true", help="Print per-batch details.")
@@ -375,8 +404,14 @@ def main(argv: list[str] | None = None) -> int:
             explicit_dests.add("surrogate_enabled")
         if "no_local_refinement" in explicit_dests:
             explicit_dests.add("local_refinement_enabled")
+        if "no_anisotropic_regions" in explicit_dests:
+            explicit_dests.add("anisotropic_regions_enabled")
         if "early_stop_enabled" in explicit_dests:
             explicit_dests.add("early_stop_enabled")
+        if "target_value" in explicit_dests:
+            explicit_dests.update({"early_stop_enabled", "early_stop_value"})
+        elif "early_stop_value" in explicit_dests:
+            explicit_dests.add("target_value")
         for key, value in load_config_file(config_args.config).items():
             if key not in explicit_dests:
                 setattr(args, key, value)
