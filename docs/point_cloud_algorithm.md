@@ -13,13 +13,17 @@ simulation; optimization is now archive-centered.
    - an objective desirability field,
    - an evaluated-cell mask used only for rendering.
 4. Build a portfolio of adaptive proposal regions from elite archive samples.
-5. Evaluate mixed candidate batches from global samples, density samples,
-   region trust samples, local quadratic surrogate optima, and incumbent probes.
+5. Evaluate mixed candidate batches from global low-discrepancy samples,
+   density samples with a global exploration floor, region trust samples,
+   region stencils, local quadratic surrogate optima, and incumbent probes.
 6. Expand or shrink region radii based on whether region-sourced candidates
-   improve the incumbent.
+   improve the incumbent; stalled regions cool down instead of deleting the
+   rest of the portfolio.
 7. Run finite-difference local refinement around the incumbent when enough
-   archive evidence exists.
-8. Emit typed batch, region, trust-region, and point-cloud snapshot diagnostics.
+   archive evidence exists. A local stall is diagnostic by default and does
+   not certify global convergence.
+8. Emit typed batch, region, trust-region, stop-reason, active/sleeping
+   region, and point-cloud snapshot diagnostics.
 
 The sample archive is the source of truth. Grid arrays are derived views for
 proposal density and visualization; they are not objective caches and are not
@@ -31,6 +35,8 @@ remapped as an optimization action.
 - CLI: `smooth-life-search point-cloud`.
 - Benchmark sweeps use point-cloud search by default.
 - The old public AGSLS class/config/CLI surface is intentionally removed.
+- Explicit early stopping is opt-in through `early_stop_enabled` and
+  `early_stop_value`.
 
 ## Acceptance Targets
 

@@ -51,6 +51,12 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(args.surrogate_enabled, defaults.surrogate_enabled)
         self.assertEqual(args.local_refinement_enabled, defaults.local_refinement_enabled)
         self.assertEqual(args.local_refinement_max_evaluations, defaults.local_refinement_max_evaluations)
+        self.assertEqual(args.early_stop_enabled, defaults.early_stop_enabled)
+        self.assertEqual(args.early_stop_value, defaults.early_stop_value)
+        self.assertEqual(args.region_stall_patience, defaults.region_stall_patience)
+        self.assertEqual(args.region_cooldown_batches, defaults.region_cooldown_batches)
+        self.assertEqual(args.global_exploration_floor, defaults.global_exploration_floor)
+        self.assertEqual(args.region_stencil_fraction, defaults.region_stencil_fraction)
 
     def test_cli_can_disable_point_cloud_features(self) -> None:
         args = build_parser().parse_args(
@@ -86,6 +92,17 @@ class TestConfigLoading(unittest.TestCase):
                 "2",
                 "--region-initial-radius-fraction",
                 "0.2",
+                "--early-stop-enabled",
+                "--early-stop-value",
+                "0.001",
+                "--region-stall-patience",
+                "5",
+                "--region-cooldown-batches",
+                "6",
+                "--global-exploration-floor",
+                "0.2",
+                "--region-stencil-fraction",
+                "0.5",
                 "--local-refinement-max-evaluations",
                 "21",
             ]
@@ -95,6 +112,12 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(args.initial_design_size, 13)
         self.assertEqual(args.portfolio_size, 2)
         self.assertAlmostEqual(args.region_initial_radius_fraction, 0.2)
+        self.assertTrue(args.early_stop_enabled)
+        self.assertAlmostEqual(args.early_stop_value, 0.001)
+        self.assertEqual(args.region_stall_patience, 5)
+        self.assertEqual(args.region_cooldown_batches, 6)
+        self.assertAlmostEqual(args.global_exploration_floor, 0.2)
+        self.assertAlmostEqual(args.region_stencil_fraction, 0.5)
         self.assertEqual(args.local_refinement_max_evaluations, 21)
 
     def test_agsls_command_is_removed(self) -> None:

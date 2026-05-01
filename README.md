@@ -3,14 +3,14 @@
 Smooth-Life-Search is a small Python package for 2D SmoothLife-inspired simulation and archive-centered optimization.
 
 - `SmoothLifeSearch` is the literal dense SmoothLife-style simulator. It keeps field evolution, disk/ring neighborhoods, lazy objective evaluation, objective-aware transition dynamics, and optional guided objective support.
-- `PointCloudSmoothLifeSearch` is the optimizer. It keeps a persistent archive of evaluated points, derives temporary SmoothLife-style density views from that archive, and proposes new candidates from global samples, density samples, adaptive trust regions, local quadratic surrogates, and incumbent-centered refinement probes.
+- `PointCloudSmoothLifeSearch` is the optimizer. It keeps a persistent archive of evaluated points, derives temporary SmoothLife-style density views from that archive, and proposes new candidates from global low-discrepancy samples, density samples, adaptive trust regions, local quadratic surrogates, region stencils, and incumbent-centered refinement probes.
 
 ## What It Implements
 
 - Literal 2D SmoothLife-style state evolution with disk and ring neighborhoods.
 - Objective-aware transition dynamics for dense SmoothLife simulation.
 - Archive-first point-cloud optimization where every objective evaluation is stored once.
-- Adaptive proposal-region portfolios with radius expansion/shrink feedback.
+- Adaptive proposal-region portfolios with radius expansion/shrink feedback, stall cooldown, and active/sleeping diagnostics.
 - Derived SmoothLife-style density grids for candidate proposal and visualization.
 - Quadratic local surrogate candidates and finite-difference local refinement.
 - GIF animation export for simulation and point-cloud search trajectories.
@@ -69,9 +69,11 @@ smooth-life-search benchmark --objective ackley --dimension 2 --trials 20 --budg
 
 Use `--json` on any subcommand for machine-readable output.
 
-Point-cloud trust regions are enabled by default. Disable region candidate batches with `--no-trust-regions`, disable local surrogates with `--no-surrogate`, or tune the portfolio with `--portfolio-size`, `--region-initial-radius-fraction`, `--region-expand-factor`, and `--region-shrink-factor`.
+Point-cloud trust regions are enabled by default. Disable region candidate batches with `--no-trust-regions`, disable local surrogates with `--no-surrogate`, or tune the portfolio with `--portfolio-size`, `--region-initial-radius-fraction`, `--region-expand-factor`, `--region-shrink-factor`, `--region-stall-patience`, and `--region-cooldown-batches`.
 
 Disable finite-difference incumbent refinement with `--no-local-refinement`, or tune it with `--local-refinement-start-evaluations`, `--local-refinement-max-evaluations`, and `--local-refinement-step-fraction`.
+
+By default, local refinement can report a local stall but does not stop the whole point-cloud run. Use `--early-stop-enabled --early-stop-value VALUE` when you want an explicit objective threshold to end a run early.
 
 ## Quick Start From Python
 

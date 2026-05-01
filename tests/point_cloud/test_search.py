@@ -65,6 +65,47 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
         self.assertTrue(events)
         self.assertTrue(all("radius_before" in event and "radius_after" in event for event in events))
 
+    def test_local_refinement_stall_does_not_stop_default_run(self) -> None:
+        search = self._search(seed=4, budget=90)
+        run = search.run()
+
+        self.assertEqual(run.metadata["stop_reason"], "budget_exhausted")
+        self.assertTrue(run.metadata["local_refinement_stalled"])
+        self.assertEqual(run.evaluations, 90)
+
+    def test_multiple_separated_regions_survive_dominant_incumbent(self) -> None:
+        search = self._search(seed=12, budget=180)
+        run = search.run()
+        centers = np.asarray([region["center"] for region in run.metadata["portfolio"]], dtype=float)
+
+        self.assertGreaterEqual(centers.shape[0], 2)
+        distances = np.linalg.norm(centers[:, None, :] - centers[None, :, :], axis=2)
+        self.assertGreater(float(np.max(distances)), 1.0)
+
+    def test_disabled_local_refinement_still_emits_stencil_candidates(self) -> None:
+        search = PointCloudSmoothLifeSearch(
+            lambda point: float((point[0] - 1.0) ** 2 + 2.0 * (point[1] - 1.0) ** 2),
+            [(-5.0, 5.0), (-5.0, 5.0)],
+            SmoothLifeConfig(grid_shape=(32, 32), store_all_snapshots=False),
+            PointCloudSearchConfig(
+                max_evaluations=120,
+                initial_design_size=16,
+                batch_size=12,
+                density_grid_shape=(24, 24),
+                local_refinement_enabled=False,
+            ),
+        )
+        search.reset(seed=5)
+        run = search.run()
+        sources = {
+            source
+            for event in run.metadata["batch_events"]
+            for source in event["source_counts"]
+        }
+
+        self.assertTrue(any(source.startswith("region:") and source.endswith(":stencil") for source in sources))
+        self.assertIn("exploit_stencil", sources)
+
     def test_python_api_requires_budget(self) -> None:
         search = PointCloudSmoothLifeSearch(
             sphere,

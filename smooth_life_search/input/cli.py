@@ -81,6 +81,12 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
         density_candidate_fraction=getattr(args, "density_candidate_fraction", cloud_defaults.density_candidate_fraction),
         global_candidate_fraction=getattr(args, "global_candidate_fraction", cloud_defaults.global_candidate_fraction),
         exploit_candidate_fraction=getattr(args, "exploit_candidate_fraction", cloud_defaults.exploit_candidate_fraction),
+        early_stop_enabled=getattr(args, "early_stop_enabled", cloud_defaults.early_stop_enabled),
+        early_stop_value=getattr(args, "early_stop_value", cloud_defaults.early_stop_value),
+        region_stall_patience=getattr(args, "region_stall_patience", cloud_defaults.region_stall_patience),
+        region_cooldown_batches=getattr(args, "region_cooldown_batches", cloud_defaults.region_cooldown_batches),
+        global_exploration_floor=getattr(args, "global_exploration_floor", cloud_defaults.global_exploration_floor),
+        region_stencil_fraction=getattr(args, "region_stencil_fraction", cloud_defaults.region_stencil_fraction),
         surrogate_enabled=getattr(args, "surrogate_enabled", cloud_defaults.surrogate_enabled),
         surrogate_min_samples=getattr(args, "surrogate_min_samples", cloud_defaults.surrogate_min_samples),
         surrogate_max_samples=getattr(args, "surrogate_max_samples", cloud_defaults.surrogate_max_samples),
@@ -181,6 +187,10 @@ def run_point_cloud_command(args: argparse.Namespace) -> dict[str, Any]:
         "batch_events": run.metadata.get("batch_events", []),
         "region_events": run.metadata.get("region_events", []),
         "trust_region_events": run.metadata.get("trust_region_events", []),
+        "stop_reason": run.metadata.get("stop_reason", ""),
+        "local_refinement_stalled": run.metadata.get("local_refinement_stalled", False),
+        "active_region_count": run.metadata.get("active_region_count", 0),
+        "sleeping_region_count": run.metadata.get("sleeping_region_count", 0),
         "snapshots": [_snapshot_payload(snapshot) for snapshot in run.snapshots],
         "gif_path": gif_path,
     }
@@ -228,6 +238,9 @@ def _print_point_cloud(payload: dict[str, Any], show_batches: bool) -> None:
     print(f"best point: {payload['best_point']}")
     print(f"archive size: {payload['archive_size']}")
     print(f"portfolio size: {len(payload['portfolio'])}")
+    print(f"active regions: {payload['active_region_count']}")
+    print(f"sleeping regions: {payload['sleeping_region_count']}")
+    print(f"stop reason: {payload['stop_reason']}")
     if show_batches:
         print("batch events:")
         for event in payload["batch_events"]:
@@ -312,6 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--density-candidate-fraction", type=float, default=cloud_defaults.density_candidate_fraction, help="Batch fraction sampled from the density view.")
     cloud_shared.add_argument("--global-candidate-fraction", type=float, default=cloud_defaults.global_candidate_fraction, help="Batch fraction sampled globally.")
     cloud_shared.add_argument("--exploit-candidate-fraction", type=float, default=cloud_defaults.exploit_candidate_fraction, help="Batch fraction probing near the incumbent.")
+    cloud_shared.add_argument("--early-stop-enabled", action="store_true", default=cloud_defaults.early_stop_enabled, help="Allow explicit value-threshold early stopping.")
+    cloud_shared.add_argument("--early-stop-value", type=float, default=cloud_defaults.early_stop_value, help="Best objective value threshold for explicit early stopping.")
+    cloud_shared.add_argument("--region-stall-patience", type=int, default=cloud_defaults.region_stall_patience, help="Failed region batches before a region cools down.")
+    cloud_shared.add_argument("--region-cooldown-batches", type=int, default=cloud_defaults.region_cooldown_batches, help="Batches a stalled region sleeps before receiving candidates again.")
+    cloud_shared.add_argument("--global-exploration-floor", type=float, default=cloud_defaults.global_exploration_floor, help="Fraction of density candidates reserved for global low-discrepancy exploration.")
+    cloud_shared.add_argument("--region-stencil-fraction", type=float, default=cloud_defaults.region_stencil_fraction, help="Fraction of region candidates used for coordinate/cross stencils.")
     cloud_shared.add_argument("--no-surrogate", dest="surrogate_enabled", action="store_false", default=cloud_defaults.surrogate_enabled, help="Disable local quadratic surrogate region candidates.")
     cloud_shared.add_argument("--surrogate-min-samples", type=int, default=cloud_defaults.surrogate_min_samples, help="Minimum samples for local quadratic fits.")
     cloud_shared.add_argument("--surrogate-max-samples", type=int, default=cloud_defaults.surrogate_max_samples, help="Maximum samples for local quadratic fits.")
@@ -356,6 +375,8 @@ def main(argv: list[str] | None = None) -> int:
             explicit_dests.add("surrogate_enabled")
         if "no_local_refinement" in explicit_dests:
             explicit_dests.add("local_refinement_enabled")
+        if "early_stop_enabled" in explicit_dests:
+            explicit_dests.add("early_stop_enabled")
         for key, value in load_config_file(config_args.config).items():
             if key not in explicit_dests:
                 setattr(args, key, value)

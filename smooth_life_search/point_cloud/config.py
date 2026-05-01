@@ -29,6 +29,12 @@ class PointCloudSearchConfig:
     density_candidate_fraction: float = 0.30
     global_candidate_fraction: float = 0.20
     exploit_candidate_fraction: float = 0.20
+    early_stop_enabled: bool = False
+    early_stop_value: float | None = None
+    region_stall_patience: int = 3
+    region_cooldown_batches: int = 4
+    global_exploration_floor: float = 0.10
+    region_stencil_fraction: float = 0.35
     surrogate_enabled: bool = True
     surrogate_min_samples: int = 12
     surrogate_max_samples: int = 96
@@ -40,7 +46,7 @@ class PointCloudSearchConfig:
     local_refinement_gradient_tolerance: float = 1e-7
     local_refinement_step_fraction: float = 0.10
     best_improvement_tolerance: float = 0.0
-    snapshot_interval_batches: int = 1
+    snapshot_interval_batches: int = 16
 
     def __post_init__(self) -> None:
         if self.max_evaluations is not None and self.max_evaluations <= 0:
@@ -84,6 +90,14 @@ class PointCloudSearchConfig:
             + self.exploit_candidate_fraction
         ) <= 0.0:
             raise ValueError("at least one candidate fraction must be positive")
+        if self.region_stall_patience <= 0:
+            raise ValueError("region_stall_patience must be positive")
+        if self.region_cooldown_batches < 0:
+            raise ValueError("region_cooldown_batches must be non-negative")
+        if not 0.0 <= self.global_exploration_floor <= 1.0:
+            raise ValueError("global_exploration_floor must be in [0, 1]")
+        if not 0.0 <= self.region_stencil_fraction <= 1.0:
+            raise ValueError("region_stencil_fraction must be in [0, 1]")
         if self.surrogate_min_samples <= 0 or self.surrogate_max_samples <= 0:
             raise ValueError("surrogate sample counts must be positive")
         if self.surrogate_max_samples < self.surrogate_min_samples:

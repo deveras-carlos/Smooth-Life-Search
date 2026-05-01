@@ -38,6 +38,8 @@ class PointCloudRegion:
     age: int = 0
     successes: int = 0
     failures: int = 0
+    stall_count: int = 0
+    cooldown_until: int = 0
 
     def bounds(self, search_bounds: np.ndarray) -> np.ndarray:
         widths = search_bounds[:, 1] - search_bounds[:, 0]
@@ -56,6 +58,8 @@ class PointCloudRegion:
             "age": int(self.age),
             "successes": int(self.successes),
             "failures": int(self.failures),
+            "stall_count": int(self.stall_count),
+            "cooldown_until": int(self.cooldown_until),
         }
 
 
