@@ -1,6 +1,6 @@
 """Shared core types and helpers."""
 
-from .bounds import BoundsLike, bounds_area, normalize_bounds_2d, point_in_bounds
+from .bounds import BoundsLike, bounds_area, normalize_bounds_2d, normalize_bounds_nd, point_in_bounds
 from .models import Basin, Bounds2D, Objective, SearchResult, SearchRun, SearchRunner, SmoothLifeSnapshot, ZoomEvent
 from .scheduling import (
     KERNEL_PARAMETER_FIELDS,
@@ -39,5 +39,6 @@ __all__ = [
     "build_kernel_shrink_policy",
     "combine_schedule_policies",
     "normalize_bounds_2d",
+    "normalize_bounds_nd",
     "point_in_bounds",
 ]

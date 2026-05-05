@@ -68,6 +68,31 @@ class TestPointCloudRegionGeometry(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(geometry.eigenvalues)))
         self.assertTrue(np.all(np.isfinite(geometry.axis_scales)))
 
+    def test_nd_geometry_uses_capped_active_subspace(self) -> None:
+        rng = np.random.default_rng(3)
+        points = rng.normal(0.0, 0.05, size=(80, 5))
+        points[:, 0] += np.linspace(-0.4, 0.4, points.shape[0])
+        points += 0.5
+        values = np.sum(np.square(points - 0.5), axis=1)
+
+        geometry = fit_region_geometry(
+            points,
+            values,
+            bounds=np.asarray([[0.0, 1.0]] * 5, dtype=float),
+            center=np.full(5, 0.5, dtype=float),
+            radius_fraction=0.50,
+            maximize=False,
+            min_samples=8,
+            anisotropy_max=5.0,
+            active_subspace_size=3,
+        )
+
+        self.assertEqual(geometry.reason, "archive_covariance")
+        self.assertEqual(geometry.basis.shape, (5, 3))
+        self.assertEqual(geometry.axis_scales.shape, (3,))
+        self.assertLessEqual(geometry.anisotropy, 5.0)
+        self.assertTrue(np.all(np.isfinite(geometry.basis)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,15 +52,22 @@ def fit_quadratic_surrogate(
     max_samples: int,
     regularization: float,
     max_condition: float,
+    full_quadratic_max_dimension: int = 6,
 ) -> QuadraticSurrogate:
     """Fit a convex local quadratic and return its optimum when accepted."""
 
     sample_points = np.asarray(points, dtype=float)
     sample_values = np.asarray(values, dtype=float)
     region = np.asarray(region_bounds, dtype=float)
-    if sample_points.ndim != 2 or sample_points.shape[1] != 2 or sample_values.shape != (sample_points.shape[0],):
+    if sample_points.ndim != 2 or sample_values.shape != (sample_points.shape[0],):
         return _rejected("shape_mismatch")
-    if region.shape != (2, 2) or np.any(region[:, 1] <= region[:, 0]) or not np.all(np.isfinite(region)):
+    dimension = int(sample_points.shape[1])
+    if (
+        dimension < 2
+        or region.shape != (dimension, 2)
+        or np.any(region[:, 1] <= region[:, 0])
+        or not np.all(np.isfinite(region))
+    ):
         return _rejected("invalid_region")
     inside = (
         np.all(sample_points >= region[:, 0], axis=1)
@@ -91,9 +98,17 @@ def fit_quadratic_surrogate(
         normalized_targets = normalized_targets[chosen]
         weights = weights[chosen]
 
-    x = normalized[:, 0]
-    y = normalized[:, 1]
-    design = np.column_stack((np.ones_like(x), x, y, x * x, x * y, y * y))
+    use_full_quadratic = dimension <= int(full_quadratic_max_dimension)
+    columns = [np.ones(normalized.shape[0], dtype=float)]
+    columns.extend(normalized[:, axis] for axis in range(dimension))
+    columns.extend(normalized[:, axis] * normalized[:, axis] for axis in range(dimension))
+    cross_pairs: list[tuple[int, int]] = []
+    if use_full_quadratic:
+        for first in range(dimension):
+            for second in range(first + 1, dimension):
+                cross_pairs.append((first, second))
+                columns.append(normalized[:, first] * normalized[:, second])
+    design = np.column_stack(columns)
     sqrt_weights = np.sqrt(np.maximum(weights, 1e-12))
     weighted_design = design * sqrt_weights[:, None]
     weighted_targets = normalized_targets * sqrt_weights
@@ -111,11 +126,17 @@ def fit_quadratic_surrogate(
     if condition > float(max_condition):
         return _rejected("ill_conditioned_fit", sample_count, condition)
 
-    gradient = np.asarray([coefficients[1], coefficients[2]], dtype=float)
-    hessian = np.asarray(
-        [[2.0 * coefficients[3], coefficients[4]], [coefficients[4], 2.0 * coefficients[5]]],
-        dtype=float,
-    )
+    linear_start = 1
+    square_start = linear_start + dimension
+    cross_start = square_start + dimension
+    gradient = np.asarray(coefficients[linear_start:square_start], dtype=float)
+    hessian = np.zeros((dimension, dimension), dtype=float)
+    for axis in range(dimension):
+        hessian[axis, axis] = 2.0 * coefficients[square_start + axis]
+    for pair_index, (first, second) in enumerate(cross_pairs):
+        coefficient = coefficients[cross_start + pair_index]
+        hessian[first, second] = coefficient
+        hessian[second, first] = coefficient
     try:
         eigenvalues = np.linalg.eigvalsh(hessian)
     except np.linalg.LinAlgError:
@@ -130,16 +151,15 @@ def fit_quadratic_surrogate(
         return _rejected("optimum_outside_region", sample_count, condition)
 
     point = region[:, 0] + normalized_optimum * widths
-    x0 = float(normalized_optimum[0])
-    y0 = float(normalized_optimum[1])
-    predicted_normalized = float(
-        coefficients[0]
-        + coefficients[1] * x0
-        + coefficients[2] * y0
-        + coefficients[3] * x0 * x0
-        + coefficients[4] * x0 * y0
-        + coefficients[5] * y0 * y0
-    )
+    predicted_normalized = float(coefficients[0] + np.dot(coefficients[linear_start:square_start], normalized_optimum))
+    predicted_normalized += float(np.dot(coefficients[square_start:cross_start], normalized_optimum * normalized_optimum))
+    if cross_pairs:
+        predicted_normalized += float(
+            sum(
+                coefficients[cross_start + pair_index] * normalized_optimum[first] * normalized_optimum[second]
+                for pair_index, (first, second) in enumerate(cross_pairs)
+            )
+        )
     target_value = predicted_normalized * target_span + target_min
     predicted_value = -target_value if maximize else target_value
     return QuadraticSurrogate(

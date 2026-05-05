@@ -8,7 +8,7 @@ from pathlib import Path
 
 from smooth_life_search import PointCloudSearchConfig
 from smooth_life_search.input import load_config_file, merge_config_overrides
-from smooth_life_search.input.cli import _build_configs, build_parser
+from smooth_life_search.input.cli import _build_configs, build_parser, run_point_cloud_command
 
 
 class TestConfigLoading(unittest.TestCase):
@@ -63,6 +63,43 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(args.region_geometry_min_samples, defaults.region_geometry_min_samples)
         self.assertEqual(args.local_refinement_method, defaults.local_refinement_method)
         self.assertEqual(args.local_refinement_damping, defaults.local_refinement_damping)
+        self.assertEqual(args.active_subspace_size, defaults.active_subspace_size)
+        self.assertEqual(
+            args.surrogate_full_quadratic_max_dimension,
+            defaults.surrogate_full_quadratic_max_dimension,
+        )
+        self.assertEqual(args.projection_axes, defaults.projection_axes)
+        self.assertEqual(args.source_adaptation_enabled, defaults.source_adaptation_enabled)
+        self.assertEqual(args.source_credit_temperature, defaults.source_credit_temperature)
+        self.assertEqual(args.source_exploration_floor, defaults.source_exploration_floor)
+        self.assertEqual(args.shade_enabled, defaults.shade_enabled)
+        self.assertEqual(args.shade_memory_size, defaults.shade_memory_size)
+        self.assertEqual(args.shade_pbest_fraction, defaults.shade_pbest_fraction)
+        self.assertEqual(args.shade_archive_fraction, defaults.shade_archive_fraction)
+        self.assertEqual(args.cma_region_enabled, defaults.cma_region_enabled)
+        self.assertEqual(args.cma_direction_memory_size, defaults.cma_direction_memory_size)
+        self.assertEqual(args.cma_sigma_init, defaults.cma_sigma_init)
+        self.assertEqual(args.restart_strategy_enabled, defaults.restart_strategy_enabled)
+        self.assertEqual(args.restart_stall_batches, defaults.restart_stall_batches)
+        self.assertEqual(args.evolutionary_population_size, defaults.evolutionary_population_size)
+        self.assertEqual(args.evolutionary_population_max, defaults.evolutionary_population_max)
+        self.assertEqual(args.relative_success_credit, defaults.relative_success_credit)
+        self.assertEqual(args.surrogate_ranking_enabled, defaults.surrogate_ranking_enabled)
+        self.assertEqual(args.candidate_pool_multiplier, defaults.candidate_pool_multiplier)
+        self.assertEqual(args.surrogate_ranking_neighbor_count, defaults.surrogate_ranking_neighbor_count)
+        self.assertEqual(args.probe_recenter_enabled, defaults.probe_recenter_enabled)
+        self.assertEqual(args.probe_recenter_max_restarts, defaults.probe_recenter_max_restarts)
+        self.assertEqual(args.basin_polishing_enabled, defaults.basin_polishing_enabled)
+        self.assertEqual(args.basin_polishing_min_dimension, defaults.basin_polishing_min_dimension)
+        self.assertEqual(args.basin_polishing_activation_ratio, defaults.basin_polishing_activation_ratio)
+        self.assertEqual(args.successful_direction_memory_size, defaults.successful_direction_memory_size)
+        self.assertEqual(args.direction_refinement_enabled, defaults.direction_refinement_enabled)
+        self.assertEqual(args.direction_refinement_max_evaluations, defaults.direction_refinement_max_evaluations)
+        self.assertEqual(args.linkage_blocks_enabled, defaults.linkage_blocks_enabled)
+        self.assertEqual(args.linkage_update_interval_batches, defaults.linkage_update_interval_batches)
+        self.assertEqual(args.linkage_neighbor_count, defaults.linkage_neighbor_count)
+        self.assertEqual(args.cross_block_lbfgs_enabled, defaults.cross_block_lbfgs_enabled)
+        self.assertEqual(args.cross_block_lbfgs_memory_size, defaults.cross_block_lbfgs_memory_size)
 
     def test_cli_can_disable_point_cloud_features(self) -> None:
         args = build_parser().parse_args(
@@ -76,6 +113,16 @@ class TestConfigLoading(unittest.TestCase):
                 "--no-anisotropic-regions",
                 "--no-surrogate",
                 "--no-local-refinement",
+                "--no-source-adaptation",
+                "--no-shade",
+                "--no-cma-region",
+                "--no-restart-strategy",
+                "--no-surrogate-ranking",
+                "--no-probe-recenter",
+                "--no-basin-polishing",
+                "--no-direction-refinement",
+                "--no-linkage-blocks",
+                "--no-cross-block-lbfgs",
             ]
         )
 
@@ -83,6 +130,16 @@ class TestConfigLoading(unittest.TestCase):
         self.assertFalse(args.anisotropic_regions_enabled)
         self.assertFalse(args.surrogate_enabled)
         self.assertFalse(args.local_refinement_enabled)
+        self.assertFalse(args.source_adaptation_enabled)
+        self.assertFalse(args.shade_enabled)
+        self.assertFalse(args.cma_region_enabled)
+        self.assertFalse(args.restart_strategy_enabled)
+        self.assertFalse(args.surrogate_ranking_enabled)
+        self.assertFalse(args.probe_recenter_enabled)
+        self.assertFalse(args.basin_polishing_enabled)
+        self.assertFalse(args.direction_refinement_enabled)
+        self.assertFalse(args.linkage_blocks_enabled)
+        self.assertFalse(args.cross_block_lbfgs_enabled)
 
     def test_cli_can_configure_point_cloud_controls(self) -> None:
         args = build_parser().parse_args(
@@ -117,12 +174,61 @@ class TestConfigLoading(unittest.TestCase):
                 "7",
                 "--region-geometry-min-samples",
                 "9",
+                "--active-subspace-size",
+                "5",
+                "--surrogate-full-quadratic-max-dimension",
+                "4",
+                "--projection-axes",
+                "1",
+                "3",
                 "--local-refinement-max-evaluations",
                 "21",
                 "--local-refinement-method",
                 "levenberg-marquardt",
                 "--local-refinement-damping",
                 "1e-4",
+                "--source-credit-temperature",
+                "0.5",
+                "--source-exploration-floor",
+                "0.07",
+                "--shade-memory-size",
+                "5",
+                "--shade-pbest-fraction",
+                "0.3",
+                "--shade-archive-fraction",
+                "0.6",
+                "--cma-direction-memory-size",
+                "6",
+                "--cma-sigma-init",
+                "0.11",
+                "--restart-stall-batches",
+                "8",
+                "--evolutionary-population-size",
+                "96",
+                "--evolutionary-population-max",
+                "256",
+                "--relative-success-credit",
+                "0.35",
+                "--candidate-pool-multiplier",
+                "4",
+                "--surrogate-ranking-neighbor-count",
+                "24",
+                "--probe-recenter-max-restarts",
+                "3",
+                "--basin-polishing-min-dimension",
+                "20",
+                "--basin-polishing-activation-ratio",
+                "0.15",
+                "--successful-direction-memory-size",
+                "12",
+                "--direction-refinement-max-evaluations",
+                "64",
+                "--linkage-update-interval-batches",
+                "4",
+                "--linkage-neighbor-count",
+                "5",
+                "--cross-block-lbfgs-memory-size",
+                "10",
             ]
         )
 
@@ -139,9 +245,116 @@ class TestConfigLoading(unittest.TestCase):
         self.assertAlmostEqual(args.region_stencil_fraction, 0.5)
         self.assertAlmostEqual(args.region_anisotropy_max, 7.0)
         self.assertEqual(args.region_geometry_min_samples, 9)
+        self.assertEqual(args.active_subspace_size, 5)
+        self.assertEqual(args.surrogate_full_quadratic_max_dimension, 4)
+        self.assertEqual(args.projection_axes, [1, 3])
         self.assertEqual(args.local_refinement_max_evaluations, 21)
         self.assertEqual(args.local_refinement_method, "levenberg-marquardt")
         self.assertAlmostEqual(args.local_refinement_damping, 1e-4)
+        self.assertAlmostEqual(args.source_credit_temperature, 0.5)
+        self.assertAlmostEqual(args.source_exploration_floor, 0.07)
+        self.assertEqual(args.shade_memory_size, 5)
+        self.assertAlmostEqual(args.shade_pbest_fraction, 0.3)
+        self.assertAlmostEqual(args.shade_archive_fraction, 0.6)
+        self.assertEqual(args.cma_direction_memory_size, 6)
+        self.assertAlmostEqual(args.cma_sigma_init, 0.11)
+        self.assertEqual(args.restart_stall_batches, 8)
+        self.assertEqual(args.evolutionary_population_size, 96)
+        self.assertEqual(args.evolutionary_population_max, 256)
+        self.assertAlmostEqual(args.relative_success_credit, 0.35)
+        self.assertEqual(args.candidate_pool_multiplier, 4)
+        self.assertEqual(args.surrogate_ranking_neighbor_count, 24)
+        self.assertEqual(args.probe_recenter_max_restarts, 3)
+        self.assertEqual(args.basin_polishing_min_dimension, 20)
+        self.assertAlmostEqual(args.basin_polishing_activation_ratio, 0.15)
+        self.assertEqual(args.successful_direction_memory_size, 12)
+        self.assertEqual(args.direction_refinement_max_evaluations, 64)
+        self.assertEqual(args.linkage_update_interval_batches, 4)
+        self.assertEqual(args.linkage_neighbor_count, 5)
+        self.assertEqual(args.cross_block_lbfgs_memory_size, 10)
+
+    def test_cli_builds_evolutionary_point_cloud_config(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "point-cloud",
+                "--objective",
+                "sphere",
+                "--dimension",
+                "30",
+                "--budget",
+                "100",
+                "--source-credit-temperature",
+                "0.4",
+                "--source-exploration-floor",
+                "0.05",
+                "--shade-memory-size",
+                "7",
+                "--shade-pbest-fraction",
+                "0.25",
+                "--shade-archive-fraction",
+                "0.75",
+                "--cma-direction-memory-size",
+                "9",
+                "--cma-sigma-init",
+                "0.12",
+                "--restart-stall-batches",
+                "6",
+                "--evolutionary-population-size",
+                "128",
+                "--evolutionary-population-max",
+                "300",
+                "--relative-success-credit",
+                "0.4",
+                "--candidate-pool-multiplier",
+                "5",
+                "--surrogate-ranking-neighbor-count",
+                "20",
+                "--probe-recenter-max-restarts",
+                "6",
+                "--basin-polishing-activation-ratio",
+                "0.2",
+                "--successful-direction-memory-size",
+                "18",
+                "--direction-refinement-max-evaluations",
+                "48",
+                "--linkage-neighbor-count",
+                "4",
+                "--cross-block-lbfgs-memory-size",
+                "11",
+            ]
+        )
+
+        _bounds, _smoothlife, point_cloud = _build_configs(args)
+
+        self.assertTrue(point_cloud.source_adaptation_enabled)
+        self.assertAlmostEqual(point_cloud.source_credit_temperature, 0.4)
+        self.assertAlmostEqual(point_cloud.source_exploration_floor, 0.05)
+        self.assertTrue(point_cloud.shade_enabled)
+        self.assertEqual(point_cloud.shade_memory_size, 7)
+        self.assertAlmostEqual(point_cloud.shade_pbest_fraction, 0.25)
+        self.assertAlmostEqual(point_cloud.shade_archive_fraction, 0.75)
+        self.assertTrue(point_cloud.cma_region_enabled)
+        self.assertEqual(point_cloud.cma_direction_memory_size, 9)
+        self.assertAlmostEqual(point_cloud.cma_sigma_init, 0.12)
+        self.assertTrue(point_cloud.restart_strategy_enabled)
+        self.assertEqual(point_cloud.restart_stall_batches, 6)
+        self.assertEqual(point_cloud.evolutionary_population_size, 128)
+        self.assertEqual(point_cloud.evolutionary_population_max, 300)
+        self.assertAlmostEqual(point_cloud.relative_success_credit, 0.4)
+        self.assertTrue(point_cloud.surrogate_ranking_enabled)
+        self.assertEqual(point_cloud.candidate_pool_multiplier, 5)
+        self.assertEqual(point_cloud.surrogate_ranking_neighbor_count, 20)
+        self.assertTrue(point_cloud.probe_recenter_enabled)
+        self.assertEqual(point_cloud.probe_recenter_max_restarts, 6)
+        self.assertTrue(point_cloud.basin_polishing_enabled)
+        self.assertAlmostEqual(point_cloud.basin_polishing_activation_ratio, 0.2)
+        self.assertEqual(point_cloud.successful_direction_memory_size, 18)
+        self.assertTrue(point_cloud.direction_refinement_enabled)
+        self.assertEqual(point_cloud.direction_refinement_max_evaluations, 48)
+        self.assertTrue(point_cloud.linkage_blocks_enabled)
+        self.assertEqual(point_cloud.linkage_neighbor_count, 4)
+        self.assertTrue(point_cloud.cross_block_lbfgs_enabled)
+        self.assertEqual(point_cloud.cross_block_lbfgs_memory_size, 11)
 
     def test_target_value_enables_early_stop_in_point_cloud_config(self) -> None:
         args = build_parser().parse_args(
@@ -160,6 +373,58 @@ class TestConfigLoading(unittest.TestCase):
 
         self.assertTrue(point_cloud.early_stop_enabled)
         self.assertAlmostEqual(point_cloud.early_stop_value, 1e-9)
+
+    def test_point_cloud_accepts_nd_dimension_and_projection_axes(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "point-cloud",
+                "--objective",
+                "sphere",
+                "--dimension",
+                "5",
+                "--budget",
+                "100",
+                "--projection-axes",
+                "1",
+                "4",
+            ]
+        )
+
+        bounds, _smoothlife, point_cloud = _build_configs(args)
+
+        self.assertEqual(len(bounds), 5)
+        self.assertEqual(point_cloud.projection_axes, (1, 4))
+
+    def test_simulate_and_himmelblau_reject_nd_dimension(self) -> None:
+        simulate_args = build_parser().parse_args(
+            ["simulate", "--objective", "sphere", "--dimension", "5", "--steps", "1"]
+        )
+        with self.assertRaisesRegex(ValueError, "simulate"):
+            _build_configs(simulate_args)
+
+        himmelblau_args = build_parser().parse_args(
+            ["point-cloud", "--objective", "himmelblau", "--dimension", "5", "--budget", "100"]
+        )
+        with self.assertRaisesRegex(ValueError, "himmelblau"):
+            _build_configs(himmelblau_args)
+
+    def test_point_cloud_nd_rejects_visualization_outputs(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "point-cloud",
+                "--objective",
+                "sphere",
+                "--dimension",
+                "5",
+                "--budget",
+                "100",
+                "--gif",
+                "nd.gif",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "visualization"):
+            run_point_cloud_command(args)
 
     def test_agsls_command_is_removed(self) -> None:
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):

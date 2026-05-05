@@ -6,7 +6,14 @@ import numpy as np
 from smooth_life_search.input.cli import build_parser, run_point_cloud_command
 
 
-def _run_cli_case(objective: str, budget: int, extra_args: list[str] | None = None, *, seed: int = 7) -> dict:
+def _run_cli_case(
+    objective: str,
+    budget: int,
+    extra_args: list[str] | None = None,
+    *,
+    seed: int = 7,
+    dimension: int = 2,
+) -> dict:
     parser = build_parser()
     args = parser.parse_args(
         [
@@ -14,7 +21,7 @@ def _run_cli_case(objective: str, budget: int, extra_args: list[str] | None = No
             "--objective",
             objective,
             "--dimension",
-            "2",
+            str(dimension),
             "--seed",
             str(seed),
             "--budget",
@@ -103,6 +110,70 @@ class TestPointCloudRegressionSmoke(unittest.TestCase):
                 for event in payload["batch_events"]
             )
         )
+
+    def test_sphere_5d_and_10d_reach_origin(self) -> None:
+        for dimension in (5, 10):
+            with self.subTest(dimension=dimension):
+                payload = _run_cli_case(
+                    "sphere",
+                    5000,
+                    ["--target-value", "0.0"],
+                    dimension=dimension,
+                )
+                self.assertEqual(payload["best_value"], 0.0)
+                self.assertEqual(payload["best_point"], [0.0] * dimension)
+
+    def test_ackley_and_rastrigin_5d_reach_origin(self) -> None:
+        for objective in ("ackley", "rastrigin"):
+            with self.subTest(objective=objective):
+                payload = _run_cli_case(
+                    objective,
+                    5000,
+                    ["--target-value", "0.0"],
+                    dimension=5,
+                )
+                self.assertEqual(payload["best_value"], 0.0)
+                self.assertEqual(payload["best_point"], [0.0] * 5)
+
+    def test_rosenbrock_5d_reaches_practical_target(self) -> None:
+        payload = _run_cli_case(
+            "rosenbrock",
+            20000,
+            ["--target-value", "1e-6"],
+            dimension=5,
+        )
+
+        self.assertLess(payload["best_value"], 1e-6)
+        self.assertEqual(payload["stop_reason"], "early_stop_value")
+
+    def test_rosenbrock_10d_seed7_6400_remains_solved(self) -> None:
+        payload = _run_cli_case("rosenbrock", 6400, dimension=10)
+
+        self.assertLess(payload["best_value"], 1e-10)
+
+    def test_rosenbrock_30d_and_50d_seed7_6400_improve_without_scout_shortcut(self) -> None:
+        cases = [(30, 1.0), (50, 0.05), (100, 90.0)]
+        for dimension, threshold in cases:
+            with self.subTest(dimension=dimension):
+                payload = _run_cli_case("rosenbrock", 6400, dimension=dimension)
+                sources = {
+                    source
+                    for event in payload["batch_events"]
+                    for source in event.get("source_counts", {})
+                }
+
+                self.assertLess(payload["best_value"], threshold)
+                self.assertGreater(payload["best_value"], 0.0)
+                self.assertFalse(np.allclose(payload["best_point"], [1.0] * dimension))
+                self.assertIn("shade", sources)
+                self.assertIn("restart:scout", sources)
+                self.assertTrue(any(":cma" in source for source in sources))
+
+    def test_rosenbrock_500d_seed7_6400_beats_center_baseline(self) -> None:
+        payload = _run_cli_case("rosenbrock", 6400, dimension=500)
+
+        self.assertLess(payload["best_value"], 490.0)
+        self.assertGreater(payload["best_value"], 0.0)
 
 
 if __name__ == "__main__":
