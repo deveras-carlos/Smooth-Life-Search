@@ -1440,7 +1440,9 @@ class PointCloudSmoothLifeSearch:
             "smoothlife_density": max(float(self.config.density_candidate_fraction), 0.08),
             "region": float(self.config.region_candidate_fraction if self.config.trust_regions_enabled else 0.0),
             "exploit": max(float(self.config.exploit_candidate_fraction) * 0.50, 0.04),
-            "coherent": 0.18 if self._cooperative_refinement_active() else 0.08,
+            "coherent": (0.18 if self._cooperative_refinement_active() else 0.08)
+            if self.config.coherent_probes_enabled
+            else 0.0,
             "shade": 0.30 if self.config.shade_enabled else 0.0,
             "cma": 0.24 if self.config.cma_region_enabled and self.config.trust_regions_enabled else 0.0,
             "cooperative": 0.10 if self._cooperative_refinement_active() else 0.0,
@@ -1456,7 +1458,9 @@ class PointCloudSmoothLifeSearch:
                 "smoothlife_density": 0.08,
                 "region": 0.22 if self.config.trust_regions_enabled else 0.0,
                 "exploit": 0.22,
-                "coherent": 0.18 if self._cooperative_refinement_active() else 0.10,
+                "coherent": (0.18 if self._cooperative_refinement_active() else 0.10)
+                if self.config.coherent_probes_enabled
+                else 0.0,
                 "shade": 0.16 if self.config.shade_enabled else 0.0,
                 "cma": 0.24 if self.config.cma_region_enabled and self.config.trust_regions_enabled else 0.0,
                 "cooperative": 0.18 if self._cooperative_refinement_active() else 0.0,
@@ -1562,7 +1566,12 @@ class PointCloudSmoothLifeSearch:
         return candidates
 
     def _coherent_candidates(self, count: int) -> list[CandidateProposal]:
-        if count <= 0 or not self._evolutionary_search_active() or not np.isfinite(self.best_value):
+        if (
+            count <= 0
+            or not self.config.coherent_probes_enabled
+            or not self._evolutionary_search_active()
+            or not np.isfinite(self.best_value)
+        ):
             return []
         normalized_best = np.clip(self._normalized_point(self.best_point), 0.0, 1.0)
         quantiles = (
@@ -3670,6 +3679,7 @@ class PointCloudSmoothLifeSearch:
                     "high_dimensional_refinement_enabled": bool(self.config.high_dimensional_refinement_enabled),
                     "dimension_scaled_batches_enabled": bool(self.config.dimension_scaled_batches_enabled),
                     "source_adaptation_enabled": bool(self.config.source_adaptation_enabled),
+                    "coherent_probes_enabled": bool(self.config.coherent_probes_enabled),
                     "shade_enabled": bool(self.config.shade_enabled),
                     "cma_region_enabled": bool(self.config.cma_region_enabled),
                     "restart_strategy_enabled": bool(self.config.restart_strategy_enabled),

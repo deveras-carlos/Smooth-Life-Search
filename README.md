@@ -90,7 +90,7 @@ Anisotropic proposal regions are enabled by default. Disable rotated archive-der
 
 For N-D runs, tune the local active subspace with `--active-subspace-size`, the surrogate model cutoff with `--surrogate-full-quadratic-max-dimension`, and the 2D proposal-density projection with `--projection-axes I J`.
 
-For high-dimensional runs, evolutionary proposal sources turn on at `--high-dimensional-min-dimension` by default. Restart scouts use scrambled low-discrepancy points with per-axis variation, so they explore broadly without injecting constant diagonal benchmark optima. Tune adaptive allocation with `--source-credit-temperature`, `--source-exploration-floor`, `--relative-success-credit`, `--evolutionary-population-size`, and `--evolutionary-population-max`; tune surrogate preselection with `--candidate-pool-multiplier` and `--surrogate-ranking-neighbor-count`; disable individual engines with `--no-source-adaptation`, `--no-shade`, `--no-cma-region`, `--no-restart-strategy`, or `--no-surrogate-ranking`.
+For high-dimensional runs, evolutionary proposal sources turn on at `--high-dimensional-min-dimension` by default. Restart scouts use scrambled low-discrepancy points with per-axis variation, so they explore broadly without injecting constant diagonal benchmark optima. Tune adaptive allocation with `--source-credit-temperature`, `--source-exploration-floor`, `--relative-success-credit`, `--evolutionary-population-size`, and `--evolutionary-population-max`; tune surrogate preselection with `--candidate-pool-multiplier` and `--surrogate-ranking-neighbor-count`; disable individual engines with `--no-source-adaptation`, `--no-coherent-probes`, `--no-shade`, `--no-cma-region`, `--no-restart-strategy`, or `--no-surrogate-ranking`.
 
 High-dimensional local polishing is also enabled by default. Once the archive
 has moved materially beyond deterministic anchors, basin-polishing allocation
@@ -124,6 +124,16 @@ smooth-life-search point-cloud --objective rosenbrock --dimension 500 --seed 7 -
 
 The current checkpoint lands below `1.0` on 100D and around `1.9e1` on 500D
 for those commands, while still exhausting the requested budget by default.
+
+Use the ablation runner to measure source contributions without rendering GIFs:
+
+```bash
+python tools/point_cloud_ablation.py --case-set primary --format markdown --output docs/point_cloud_ablation_report.md
+python tools/point_cloud_ablation.py --case-set all --format jsonl --output point-cloud-ablation.jsonl
+```
+
+The Markdown report is intended for short checkpoint notes; keep raw JSONL/CSV
+artifacts local unless you explicitly want to version a full run log.
 
 Disable finite-difference incumbent refinement with `--no-local-refinement`, or tune it with `--local-refinement-start-evaluations`, `--local-refinement-max-evaluations`, `--local-refinement-step-fraction`, `--local-refinement-method`, and `--local-refinement-damping`.
 

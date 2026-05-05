@@ -181,6 +181,11 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             "source_exploration_floor",
             cloud_defaults.source_exploration_floor,
         ),
+        coherent_probes_enabled=getattr(
+            args,
+            "coherent_probes_enabled",
+            cloud_defaults.coherent_probes_enabled,
+        ),
         shade_enabled=getattr(args, "shade_enabled", cloud_defaults.shade_enabled),
         shade_memory_size=getattr(args, "shade_memory_size", cloud_defaults.shade_memory_size),
         shade_pbest_fraction=getattr(args, "shade_pbest_fraction", cloud_defaults.shade_pbest_fraction),
@@ -584,6 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--no-source-adaptation", dest="source_adaptation_enabled", action="store_false", default=cloud_defaults.source_adaptation_enabled, help="Disable adaptive source credit allocation for high-dimensional evolutionary proposals.")
     cloud_shared.add_argument("--source-credit-temperature", type=float, default=cloud_defaults.source_credit_temperature, help="Softmax temperature for adaptive source credit allocation.")
     cloud_shared.add_argument("--source-exploration-floor", type=float, default=cloud_defaults.source_exploration_floor, help="Minimum allocation probability for each enabled evolutionary source.")
+    cloud_shared.add_argument("--no-coherent-probes", dest="coherent_probes_enabled", action="store_false", default=cloud_defaults.coherent_probes_enabled, help="Disable high-dimensional coherent coordinate probes.")
     cloud_shared.add_argument("--no-shade", dest="shade_enabled", action="store_false", default=cloud_defaults.shade_enabled, help="Disable SHADE-style archive-difference proposals in high-dimensional runs.")
     cloud_shared.add_argument("--shade-memory-size", type=int, default=cloud_defaults.shade_memory_size, help="Number of adaptive F/CR memory slots for SHADE proposals.")
     cloud_shared.add_argument("--shade-pbest-fraction", type=float, default=cloud_defaults.shade_pbest_fraction, help="Elite archive fraction used for SHADE current-to-pbest proposals.")
@@ -663,6 +669,8 @@ def main(argv: list[str] | None = None) -> int:
             explicit_dests.add("dimension_scaled_batches_enabled")
         if "no_source_adaptation" in explicit_dests:
             explicit_dests.add("source_adaptation_enabled")
+        if "no_coherent_probes" in explicit_dests:
+            explicit_dests.add("coherent_probes_enabled")
         if "no_shade" in explicit_dests:
             explicit_dests.add("shade_enabled")
         if "no_cma_region" in explicit_dests:

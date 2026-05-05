@@ -62,6 +62,7 @@ class PointCloudSearchConfig:
     source_adaptation_enabled: bool = True
     source_credit_temperature: float = 0.25
     source_exploration_floor: float = 0.03
+    coherent_probes_enabled: bool = True
     shade_enabled: bool = True
     shade_memory_size: int = 8
     shade_pbest_fraction: float = 0.20

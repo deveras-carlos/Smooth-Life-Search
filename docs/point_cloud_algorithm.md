@@ -73,10 +73,11 @@ into the full coordinate space around the current incumbent or active region.
 - High-dimensional evolutionary proposals are controlled by
   `source_adaptation_enabled`, `source_credit_temperature`,
   `source_exploration_floor`, `evolutionary_population_size`,
-  `evolutionary_population_max`, `relative_success_credit`, `shade_enabled`,
-  `shade_memory_size`, `shade_pbest_fraction`, `shade_archive_fraction`,
-  `cma_region_enabled`, `cma_direction_memory_size`, `cma_sigma_init`,
-  `restart_strategy_enabled`, and `restart_stall_batches`.
+  `evolutionary_population_max`, `relative_success_credit`,
+  `coherent_probes_enabled`, `shade_enabled`, `shade_memory_size`,
+  `shade_pbest_fraction`, `shade_archive_fraction`, `cma_region_enabled`,
+  `cma_direction_memory_size`, `cma_sigma_init`, `restart_strategy_enabled`,
+  and `restart_stall_batches`.
 - Surrogate preselection is controlled by `surrogate_ranking_enabled`,
   `candidate_pool_multiplier`, and `surrogate_ranking_neighbor_count`.
 - Basin-polishing controls are `probe_recenter_enabled`,
@@ -94,6 +95,10 @@ into the full coordinate space around the current incumbent or active region.
 - Default CLI runs exhaust their requested budget for global-search
   diagnostics. Use `--target-value 1e-11` for Rosenbrock-style runs where
   reaching a known precision target is the desired stopping condition.
+- `tools/point_cloud_ablation.py` runs deterministic no-GIF ablation matrices
+  for high-D Rosenbrock, transformed 12D guardrails, shifted Ackley, and
+  symmetric anchor sanity cases. Use it to measure proposal-source
+  contribution before changing optimizer policy.
 
 ## N-D Phase 1 Scope
 

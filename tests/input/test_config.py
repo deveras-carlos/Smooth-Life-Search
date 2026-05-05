@@ -72,6 +72,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(args.source_adaptation_enabled, defaults.source_adaptation_enabled)
         self.assertEqual(args.source_credit_temperature, defaults.source_credit_temperature)
         self.assertEqual(args.source_exploration_floor, defaults.source_exploration_floor)
+        self.assertEqual(args.coherent_probes_enabled, defaults.coherent_probes_enabled)
         self.assertEqual(args.shade_enabled, defaults.shade_enabled)
         self.assertEqual(args.shade_memory_size, defaults.shade_memory_size)
         self.assertEqual(args.shade_pbest_fraction, defaults.shade_pbest_fraction)
@@ -120,6 +121,7 @@ class TestConfigLoading(unittest.TestCase):
                 "--no-surrogate",
                 "--no-local-refinement",
                 "--no-source-adaptation",
+                "--no-coherent-probes",
                 "--no-shade",
                 "--no-cma-region",
                 "--no-restart-strategy",
@@ -138,6 +140,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertFalse(args.surrogate_enabled)
         self.assertFalse(args.local_refinement_enabled)
         self.assertFalse(args.source_adaptation_enabled)
+        self.assertFalse(args.coherent_probes_enabled)
         self.assertFalse(args.shade_enabled)
         self.assertFalse(args.cma_region_enabled)
         self.assertFalse(args.restart_strategy_enabled)
@@ -362,6 +365,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertTrue(point_cloud.source_adaptation_enabled)
         self.assertAlmostEqual(point_cloud.source_credit_temperature, 0.4)
         self.assertAlmostEqual(point_cloud.source_exploration_floor, 0.05)
+        self.assertTrue(point_cloud.coherent_probes_enabled)
         self.assertTrue(point_cloud.shade_enabled)
         self.assertEqual(point_cloud.shade_memory_size, 7)
         self.assertAlmostEqual(point_cloud.shade_pbest_fraction, 0.25)

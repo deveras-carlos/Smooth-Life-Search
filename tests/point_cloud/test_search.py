@@ -381,6 +381,13 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
         self.assertTrue(np.all(points <= 10.0))
         self.assertTrue(np.all(np.var(normalized, axis=1) > 0.0))
 
+    def test_coherent_probes_can_be_disabled(self) -> None:
+        search = self._high_dimensional_search(dimension=30, seed=13)
+        search.config.coherent_probes_enabled = False
+
+        self.assertEqual(search._coherent_candidates(6), [])
+        self.assertEqual(search._candidate_counts(64).get("coherent", 0), 0)
+
     def test_high_dimensional_ecology_density_view_is_finite_and_nonblank(self) -> None:
         search = self._high_dimensional_search(dimension=30, seed=9)
         density, objective, evaluated = search._density_view()
