@@ -293,6 +293,36 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             "cross_block_lbfgs_memory_size",
             cloud_defaults.cross_block_lbfgs_memory_size,
         ),
+        cooperative_refinement_enabled=getattr(
+            args,
+            "cooperative_refinement_enabled",
+            cloud_defaults.cooperative_refinement_enabled,
+        ),
+        cooperative_min_dimension=getattr(
+            args,
+            "cooperative_min_dimension",
+            cloud_defaults.cooperative_min_dimension,
+        ),
+        cooperative_group_size=getattr(
+            args,
+            "cooperative_group_size",
+            cloud_defaults.cooperative_group_size,
+        ),
+        cooperative_groups_per_batch=getattr(
+            args,
+            "cooperative_groups_per_batch",
+            cloud_defaults.cooperative_groups_per_batch,
+        ),
+        active_set_max_fraction=getattr(
+            args,
+            "active_set_max_fraction",
+            cloud_defaults.active_set_max_fraction,
+        ),
+        active_set_expand_interval_batches=getattr(
+            args,
+            "active_set_expand_interval_batches",
+            cloud_defaults.active_set_expand_interval_batches,
+        ),
         projection_axes=(
             None
             if getattr(args, "projection_axes", cloud_defaults.projection_axes) is None
@@ -582,6 +612,12 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--linkage-neighbor-count", type=int, default=cloud_defaults.linkage_neighbor_count, help="Strong neighbors included in linkage-aware blocks.")
     cloud_shared.add_argument("--no-cross-block-lbfgs", dest="cross_block_lbfgs_enabled", action="store_false", default=cloud_defaults.cross_block_lbfgs_enabled, help="Disable limited-memory cross-block BFGS directions.")
     cloud_shared.add_argument("--cross-block-lbfgs-memory-size", type=int, default=cloud_defaults.cross_block_lbfgs_memory_size, help="Number of accepted cross-block secant pairs kept.")
+    cloud_shared.add_argument("--no-cooperative-refinement", dest="cooperative_refinement_enabled", action="store_false", default=cloud_defaults.cooperative_refinement_enabled, help="Disable large-D active-set cooperative refinement.")
+    cloud_shared.add_argument("--cooperative-min-dimension", type=int, default=cloud_defaults.cooperative_min_dimension, help="Dimension threshold where cooperative active-set refinement activates.")
+    cloud_shared.add_argument("--cooperative-group-size", type=int, default=cloud_defaults.cooperative_group_size, help="Coordinate group size for cooperative refinement; defaults to active subspace size.")
+    cloud_shared.add_argument("--cooperative-groups-per-batch", type=int, default=cloud_defaults.cooperative_groups_per_batch, help="Cooperative coordinate groups attempted per batch.")
+    cloud_shared.add_argument("--active-set-max-fraction", type=float, default=cloud_defaults.active_set_max_fraction, help="Maximum fraction of axes kept in the large-D active set.")
+    cloud_shared.add_argument("--active-set-expand-interval-batches", type=int, default=cloud_defaults.active_set_expand_interval_batches, help="Batches between active-set coverage expansion refreshes.")
 
     point_cloud = subparsers.add_parser("point-cloud", parents=[shared, cloud_shared], help="Run point-cloud SmoothLife optimization.")
     point_cloud.add_argument("--show-batches", action="store_true", help="Print per-batch details.")
@@ -645,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
             explicit_dests.add("linkage_blocks_enabled")
         if "no_cross_block_lbfgs" in explicit_dests:
             explicit_dests.add("cross_block_lbfgs_enabled")
+        if "no_cooperative_refinement" in explicit_dests:
+            explicit_dests.add("cooperative_refinement_enabled")
         if "early_stop_enabled" in explicit_dests:
             explicit_dests.add("early_stop_enabled")
         if "target_value" in explicit_dests:

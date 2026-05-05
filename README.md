@@ -105,6 +105,26 @@ with `--no-probe-recenter`, `--no-basin-polishing`,
 `--no-direction-refinement`, `--no-linkage-blocks`, or
 `--no-cross-block-lbfgs`.
 
+For very large dimensions, cooperative active-set propagation is enabled by
+default from `--cooperative-min-dimension`. It scores axes from successful
+steps, linkage, elite spread, and coverage pressure, then refines small
+coordinate groups in the incumbent context while coherent high-D probes test
+archive-derived coordinate levels with per-axis jitter. Tune this layer with
+`--cooperative-group-size`, `--cooperative-groups-per-batch`,
+`--active-set-max-fraction`, and
+`--active-set-expand-interval-batches`; disable it with
+`--no-cooperative-refinement`.
+
+Current no-GIF Rosenbrock smoke checks use:
+
+```bash
+smooth-life-search point-cloud --objective rosenbrock --dimension 100 --seed 7 --budget 6400
+smooth-life-search point-cloud --objective rosenbrock --dimension 500 --seed 7 --budget 6400
+```
+
+The current checkpoint lands below `1.0` on 100D and around `1.9e1` on 500D
+for those commands, while still exhausting the requested budget by default.
+
 Disable finite-difference incumbent refinement with `--no-local-refinement`, or tune it with `--local-refinement-start-evaluations`, `--local-refinement-max-evaluations`, `--local-refinement-step-fraction`, `--local-refinement-method`, and `--local-refinement-damping`.
 
 By default, local refinement can report a local stall but does not stop the whole point-cloud run; default optimization runs spend the requested budget for stronger global-search diagnostics. Use `--target-value VALUE` when you only need a run to stop once it reaches an explicit objective threshold. The longer form `--early-stop-enabled --early-stop-value VALUE` is still supported.

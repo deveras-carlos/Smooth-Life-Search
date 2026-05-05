@@ -100,6 +100,12 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(args.linkage_neighbor_count, defaults.linkage_neighbor_count)
         self.assertEqual(args.cross_block_lbfgs_enabled, defaults.cross_block_lbfgs_enabled)
         self.assertEqual(args.cross_block_lbfgs_memory_size, defaults.cross_block_lbfgs_memory_size)
+        self.assertEqual(args.cooperative_refinement_enabled, defaults.cooperative_refinement_enabled)
+        self.assertEqual(args.cooperative_min_dimension, defaults.cooperative_min_dimension)
+        self.assertEqual(args.cooperative_group_size, defaults.cooperative_group_size)
+        self.assertEqual(args.cooperative_groups_per_batch, defaults.cooperative_groups_per_batch)
+        self.assertEqual(args.active_set_max_fraction, defaults.active_set_max_fraction)
+        self.assertEqual(args.active_set_expand_interval_batches, defaults.active_set_expand_interval_batches)
 
     def test_cli_can_disable_point_cloud_features(self) -> None:
         args = build_parser().parse_args(
@@ -123,6 +129,7 @@ class TestConfigLoading(unittest.TestCase):
                 "--no-direction-refinement",
                 "--no-linkage-blocks",
                 "--no-cross-block-lbfgs",
+                "--no-cooperative-refinement",
             ]
         )
 
@@ -140,6 +147,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertFalse(args.direction_refinement_enabled)
         self.assertFalse(args.linkage_blocks_enabled)
         self.assertFalse(args.cross_block_lbfgs_enabled)
+        self.assertFalse(args.cooperative_refinement_enabled)
 
     def test_cli_can_configure_point_cloud_controls(self) -> None:
         args = build_parser().parse_args(
@@ -229,6 +237,16 @@ class TestConfigLoading(unittest.TestCase):
                 "5",
                 "--cross-block-lbfgs-memory-size",
                 "10",
+                "--cooperative-min-dimension",
+                "200",
+                "--cooperative-group-size",
+                "12",
+                "--cooperative-groups-per-batch",
+                "6",
+                "--active-set-max-fraction",
+                "0.4",
+                "--active-set-expand-interval-batches",
+                "7",
             ]
         )
 
@@ -272,6 +290,11 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(args.linkage_update_interval_batches, 4)
         self.assertEqual(args.linkage_neighbor_count, 5)
         self.assertEqual(args.cross_block_lbfgs_memory_size, 10)
+        self.assertEqual(args.cooperative_min_dimension, 200)
+        self.assertEqual(args.cooperative_group_size, 12)
+        self.assertEqual(args.cooperative_groups_per_batch, 6)
+        self.assertAlmostEqual(args.active_set_max_fraction, 0.4)
+        self.assertEqual(args.active_set_expand_interval_batches, 7)
 
     def test_cli_builds_evolutionary_point_cloud_config(self) -> None:
         args = build_parser().parse_args(
@@ -321,6 +344,16 @@ class TestConfigLoading(unittest.TestCase):
                 "4",
                 "--cross-block-lbfgs-memory-size",
                 "11",
+                "--cooperative-min-dimension",
+                "120",
+                "--cooperative-group-size",
+                "10",
+                "--cooperative-groups-per-batch",
+                "5",
+                "--active-set-max-fraction",
+                "0.3",
+                "--active-set-expand-interval-batches",
+                "6",
             ]
         )
 
@@ -355,6 +388,12 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(point_cloud.linkage_neighbor_count, 4)
         self.assertTrue(point_cloud.cross_block_lbfgs_enabled)
         self.assertEqual(point_cloud.cross_block_lbfgs_memory_size, 11)
+        self.assertTrue(point_cloud.cooperative_refinement_enabled)
+        self.assertEqual(point_cloud.cooperative_min_dimension, 120)
+        self.assertEqual(point_cloud.cooperative_group_size, 10)
+        self.assertEqual(point_cloud.cooperative_groups_per_batch, 5)
+        self.assertAlmostEqual(point_cloud.active_set_max_fraction, 0.3)
+        self.assertEqual(point_cloud.active_set_expand_interval_batches, 6)
 
     def test_target_value_enables_early_stop_in_point_cloud_config(self) -> None:
         args = build_parser().parse_args(

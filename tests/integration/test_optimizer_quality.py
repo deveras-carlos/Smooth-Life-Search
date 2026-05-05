@@ -87,7 +87,7 @@ class TestOptimizerQuality(unittest.TestCase):
         self.assertGreaterEqual(improved, 5, medians)
 
     def test_high_dimensional_rosenbrock_targets_are_met_without_exact_shortcut(self) -> None:
-        cases = [(30, 1.0), (50, 0.05), (100, 90.0), (500, 490.0)]
+        cases = [(30, 1.0), (50, 0.05), (100, 1.0), (500, 450.0)]
         for dimension, threshold in cases:
             with self.subTest(dimension=dimension):
                 search = PointCloudSmoothLifeSearch(

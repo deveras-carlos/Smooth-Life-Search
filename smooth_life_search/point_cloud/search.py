@@ -51,6 +51,7 @@ class CandidateProposal:
     family: str
     parent_key: tuple[str, ...] | None = None
     region_id: int | None = None
+    axes: tuple[int, ...] | None = None
     shade_params: tuple[float, float] | None = None
     predicted_score: float | None = None
 
@@ -133,6 +134,10 @@ class PointCloudSmoothLifeSearch:
         self._linkage_last_update_batch = -1
         self._lbfgs_pairs: list[tuple[np.ndarray, np.ndarray]] = []
         self._probe_recenters_total = 0
+        self._axis_coverage = np.zeros(self.dimension, dtype=float)
+        self._cooperative_group_cursor = 0
+        self._active_set_expansions = 0
+        self._active_set_last_expand_batch = -1
         self.reset()
 
     def reset(self, seed: int | None = None) -> None:
@@ -176,6 +181,10 @@ class PointCloudSmoothLifeSearch:
         self._linkage_last_update_batch = -1
         self._lbfgs_pairs = []
         self._probe_recenters_total = 0
+        self._axis_coverage = np.zeros(self.dimension, dtype=float)
+        self._cooperative_group_cursor = 0
+        self._active_set_expansions = 0
+        self._active_set_last_expand_batch = -1
         self._last_density = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_objective_field = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_evaluated_mask = np.zeros(self.config.density_grid_shape, dtype=bool)
@@ -231,8 +240,18 @@ class PointCloudSmoothLifeSearch:
     def _evolutionary_search_active(self) -> bool:
         return self.dimension >= int(self.config.high_dimensional_min_dimension)
 
+    def _cooperative_refinement_active(self) -> bool:
+        return bool(
+            self.config.cooperative_refinement_enabled
+            and self._evolutionary_search_active()
+            and self.dimension >= int(self.config.cooperative_min_dimension)
+            and np.isfinite(self.best_value)
+        )
+
     @staticmethod
     def _source_family(source: str) -> str:
+        if source.startswith("cooperative:"):
+            return "cooperative"
         if source.startswith("region:") and ":cma" in source:
             return "cma"
         if source.startswith("region:"):
@@ -252,6 +271,7 @@ class PointCloudSmoothLifeSearch:
         *,
         parent_key: tuple[str, ...] | None = None,
         region_id: int | None = None,
+        axes: tuple[int, ...] | None = None,
         shade_params: tuple[float, float] | None = None,
         predicted_score: float | None = None,
     ) -> CandidateProposal:
@@ -261,6 +281,7 @@ class PointCloudSmoothLifeSearch:
             family=self._source_family(str(source)),
             parent_key=parent_key,
             region_id=region_id,
+            axes=None if axes is None else tuple(int(axis) for axis in axes),
             shade_params=shade_params,
             predicted_score=predicted_score,
         )
@@ -436,6 +457,181 @@ class PointCloudSmoothLifeSearch:
                 if len(axes) >= block_size:
                     break
         return np.asarray(sorted(set(axes))[:block_size], dtype=int)
+
+    def _cooperative_group_size(self) -> int:
+        configured = self.config.cooperative_group_size
+        base = int(self.config.active_subspace_size) if configured is None else int(configured)
+        return min(self.dimension, max(1, base))
+
+    @staticmethod
+    def _unit_scaled(values: np.ndarray) -> np.ndarray:
+        resolved = np.asarray(values, dtype=float)
+        if resolved.size == 0:
+            return resolved
+        resolved = np.where(np.isfinite(resolved), resolved, 0.0)
+        span = max(float(np.max(resolved) - np.min(resolved)), 1e-12)
+        return (resolved - float(np.min(resolved))) / span
+
+    def _elite_axis_variance(self) -> np.ndarray:
+        if len(self.archive) < 4:
+            return np.zeros(self.dimension, dtype=float)
+        points, values = self.archive.arrays()
+        if points.size == 0:
+            return np.zeros(self.dimension, dtype=float)
+        target = -values if self.smoothlife_config.maximize else values
+        order = np.argsort(target)
+        count = min(points.shape[0], max(4, min(128, points.shape[0] // 2)))
+        normalized = (points[order[:count]] - self.original_bounds[:, 0]) / (
+            self.original_bounds[:, 1] - self.original_bounds[:, 0]
+        )
+        return np.var(normalized, axis=0)
+
+    def _cooperative_axis_scores(self) -> np.ndarray:
+        scores = np.zeros(self.dimension, dtype=float)
+        scores += 0.35 * self._unit_scaled(self._axis_activity)
+        if self._successful_directions:
+            directions = np.asarray(
+                self._successful_directions[-int(self.config.successful_direction_memory_size) :],
+                dtype=float,
+            )
+            scores += 0.25 * self._unit_scaled(np.mean(np.abs(directions), axis=0))
+        if self._linkage_scores.shape == (self.dimension, self.dimension):
+            scores += 0.20 * self._unit_scaled(np.sum(np.asarray(self._linkage_scores, dtype=float), axis=1))
+        scores += 0.10 * self._unit_scaled(self._elite_axis_variance())
+        coverage_pressure = 1.0 / (1.0 + np.asarray(self._axis_coverage, dtype=float))
+        scores += 0.10 * self._unit_scaled(coverage_pressure)
+        if not np.any(scores > 0.0):
+            scores = coverage_pressure
+        return np.where(np.isfinite(scores), scores, 0.0)
+
+    def _active_set_axes(self) -> np.ndarray:
+        group_size = self._cooperative_group_size()
+        cap = min(
+            self.dimension,
+            max(group_size, int(np.ceil(float(self.config.active_set_max_fraction) * self.dimension))),
+        )
+        scores = self._cooperative_axis_scores()
+        selected: list[int] = []
+
+        def add(axis: int) -> None:
+            resolved = int(axis) % self.dimension
+            if resolved not in selected:
+                selected.append(resolved)
+
+        top_count = min(cap, max(group_size, cap // 2))
+        for axis in np.argsort(scores)[::-1][:top_count]:
+            add(int(axis))
+        coverage_count = min(cap - len(selected), max(1, cap // 4))
+        for axis in np.argsort(self._axis_coverage)[:coverage_count]:
+            add(int(axis))
+        should_expand = (
+            self._active_set_last_expand_batch < 0
+            or int(self._batch_index) - int(self._active_set_last_expand_batch)
+            >= int(self.config.active_set_expand_interval_batches)
+        )
+        if should_expand:
+            self._active_set_last_expand_batch = int(self._batch_index)
+            self._active_set_expansions += 1
+        offset = int(self._active_set_expansions) % max(self.dimension, 1)
+        spread = (np.linspace(0, self.dimension - 1, num=cap, dtype=int) + offset) % self.dimension
+        for axis in spread:
+            add(int(axis))
+            if len(selected) >= cap:
+                break
+        return np.asarray(sorted(selected[:cap]), dtype=int)
+
+    def _cooperative_group_from_seed(
+        self,
+        seed_axes: list[int],
+        active_axes: np.ndarray,
+        scores: np.ndarray,
+    ) -> np.ndarray:
+        group_size = self._cooperative_group_size()
+        axes: list[int] = []
+
+        def add(axis: int) -> None:
+            resolved = int(axis) % self.dimension
+            if resolved not in axes:
+                axes.append(resolved)
+
+        for axis in seed_axes:
+            add(axis)
+        anchor = axes[0] if axes else int(active_axes[0]) if active_axes.size else 0
+        if self._linkage_scores.shape == (self.dimension, self.dimension):
+            linkage = np.asarray(self._linkage_scores[anchor], dtype=float)
+            for axis in np.argsort(linkage)[::-1]:
+                if float(linkage[int(axis)]) <= 0.0:
+                    break
+                add(int(axis))
+                if len(axes) >= min(group_size, 1 + int(self.config.linkage_neighbor_count)):
+                    break
+        half = group_size // 2
+        start = max(0, min(anchor - half, self.dimension - group_size))
+        for axis in range(start, min(self.dimension, start + group_size)):
+            add(axis)
+            if len(axes) >= group_size:
+                break
+        if len(axes) < group_size:
+            for axis in active_axes[np.argsort(scores[active_axes])[::-1]]:
+                add(int(axis))
+                if len(axes) >= group_size:
+                    break
+        if len(axes) < group_size:
+            for axis in np.argsort(self._axis_coverage):
+                add(int(axis))
+                if len(axes) >= group_size:
+                    break
+        return np.asarray(sorted(axes[:group_size]), dtype=int)
+
+    def _cooperative_groups(self, count: int | None = None) -> list[np.ndarray]:
+        if not self._cooperative_refinement_active():
+            return []
+        target_count = max(1, int(self.config.cooperative_groups_per_batch if count is None else count))
+        active_axes = self._active_set_axes()
+        if active_axes.size == 0:
+            active_axes = np.arange(self.dimension, dtype=int)
+        scores = self._cooperative_axis_scores()
+        groups: list[np.ndarray] = []
+        seen: set[tuple[int, ...]] = set()
+
+        def add_group(axes: np.ndarray) -> None:
+            key = tuple(int(axis) for axis in np.asarray(axes, dtype=int))
+            if len(key) == 0 or key in seen:
+                return
+            seen.add(key)
+            groups.append(np.asarray(key, dtype=int))
+
+        top_axes = [int(axis) for axis in active_axes[np.argsort(scores[active_axes])[::-1]]]
+        top_limit = 1
+        for axis in top_axes[:top_limit]:
+            add_group(self._cooperative_group_from_seed([axis], active_axes, scores))
+            if len(groups) >= target_count:
+                return groups
+
+        if top_axes:
+            active_front = min(
+                self.dimension - 1,
+                max(top_axes[: min(len(top_axes), self._cooperative_group_size())]) + 1,
+            )
+            add_group(self._cooperative_group_from_seed([active_front], active_axes, scores))
+            if len(groups) >= target_count:
+                return groups
+
+        low_coverage = [int(axis) for axis in np.argsort(self._axis_coverage)[:target_count]]
+        for axis in low_coverage:
+            add_group(self._cooperative_group_from_seed([axis], active_axes, scores))
+            if len(groups) >= target_count:
+                return groups
+
+        group_size = self._cooperative_group_size()
+        while len(groups) < target_count:
+            start = (int(self._cooperative_group_cursor) * group_size) % self.dimension
+            self._cooperative_group_cursor += 1
+            window = (np.arange(start, start + group_size, dtype=int) % self.dimension).tolist()
+            add_group(self._cooperative_group_from_seed(window, active_axes, scores))
+            if self._cooperative_group_cursor > target_count + self.dimension:
+                break
+        return groups
 
     def _store_lbfgs_pair(self, step: np.ndarray, gradient_delta: np.ndarray) -> None:
         if not self.config.cross_block_lbfgs_enabled:
@@ -681,6 +877,9 @@ class PointCloudSmoothLifeSearch:
             if not added:
                 continue
             source_counts[source] += 1
+            proposal_axes = None if proposal.axes is None else np.asarray(proposal.axes, dtype=int)
+            if proposal_axes is not None and proposal_axes.size > 0:
+                self._axis_coverage[proposal_axes] += 1.0
             if proposal.region_id is not None or source.startswith("region:"):
                 region_id = -1 if proposal.region_id is None else int(proposal.region_id)
                 if proposal.region_id is None:
@@ -702,6 +901,9 @@ class PointCloudSmoothLifeSearch:
                 source_relative_amounts[source] += weighted_amount
                 if parent_sample is not None:
                     self._record_successful_direction(parent_sample.point, clipped)
+                if proposal_axes is not None and proposal_axes.size > 0:
+                    self._axis_activity *= 0.999
+                    self._axis_activity[proposal_axes] += max(relative_amount, 1e-12)
                 if proposal.shade_params is not None:
                     shade_successes.append((float(proposal.shade_params[0]), float(proposal.shade_params[1]), weighted_amount))
                 if proposal.family == "cma" and proposal.region_id is not None:
@@ -712,6 +914,9 @@ class PointCloudSmoothLifeSearch:
                 if np.isfinite(incumbent_before) and value is not None:
                     amount = max(0.0, self._target(incumbent_before) - self._target(float(value)))
                     source_improvement_amounts[source] += amount
+                    if proposal_axes is not None and proposal_axes.size > 0:
+                        self._axis_activity *= 0.999
+                        self._axis_activity[proposal_axes] += max(amount, 1e-12)
                     if proposal.shade_params is not None and not relative_success:
                         shade_successes.append((float(proposal.shade_params[0]), float(proposal.shade_params[1]), amount))
                     if proposal.family == "cma" and proposal.region_id is not None and not relative_success:
@@ -744,6 +949,19 @@ class PointCloudSmoothLifeSearch:
                 "source_credit": self._source_stats_payload(),
                 "shade_successes": int(len(shade_successes)),
                 "cma_successes": int(len(cma_successes)),
+                "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
+                "active_set_size": int(self._active_set_axes().size) if self._cooperative_refinement_active() else 0,
+                "cooperative_improvements": int(
+                    sum(count for source, count in source_improvements.items() if source.startswith("cooperative:"))
+                ),
+                "active_set_expansions": int(self._active_set_expansions),
+                "top_axis_scores": [
+                    {"axis": int(axis), "score": float(self._cooperative_axis_scores()[axis])}
+                    for axis in np.argsort(self._cooperative_axis_scores())[::-1][: min(8, self.dimension)]
+                ]
+                if self._cooperative_refinement_active()
+                else [],
+                "axis_coverage_max": float(np.max(self._axis_coverage)) if self._axis_coverage.size else 0.0,
                 "basin_polishing_active": bool(self._basin_polishing_active()),
                 "anchor_baseline_target": (
                     None if self._anchor_baseline_target is None else float(self._anchor_baseline_target)
@@ -1222,9 +1440,10 @@ class PointCloudSmoothLifeSearch:
             "smoothlife_density": max(float(self.config.density_candidate_fraction), 0.08),
             "region": float(self.config.region_candidate_fraction if self.config.trust_regions_enabled else 0.0),
             "exploit": max(float(self.config.exploit_candidate_fraction) * 0.50, 0.04),
-            "coherent": 0.08,
+            "coherent": 0.18 if self._cooperative_refinement_active() else 0.08,
             "shade": 0.30 if self.config.shade_enabled else 0.0,
             "cma": 0.24 if self.config.cma_region_enabled and self.config.trust_regions_enabled else 0.0,
+            "cooperative": 0.10 if self._cooperative_refinement_active() else 0.0,
             "restart": (
                 (0.16 if self._restart_pressure_active() else max(0.03, float(self.config.source_exploration_floor)))
                 if self.config.restart_strategy_enabled
@@ -1237,9 +1456,10 @@ class PointCloudSmoothLifeSearch:
                 "smoothlife_density": 0.08,
                 "region": 0.22 if self.config.trust_regions_enabled else 0.0,
                 "exploit": 0.22,
-                "coherent": 0.10,
+                "coherent": 0.18 if self._cooperative_refinement_active() else 0.10,
                 "shade": 0.16 if self.config.shade_enabled else 0.0,
                 "cma": 0.24 if self.config.cma_region_enabled and self.config.trust_regions_enabled else 0.0,
+                "cooperative": 0.18 if self._cooperative_refinement_active() else 0.0,
                 "restart": max(float(self.config.source_exploration_floor), 0.02)
                 if self.config.restart_strategy_enabled and self._restart_pressure_active()
                 else 0.0,
@@ -1345,9 +1565,19 @@ class PointCloudSmoothLifeSearch:
         if count <= 0 or not self._evolutionary_search_active() or not np.isfinite(self.best_value):
             return []
         normalized_best = np.clip(self._normalized_point(self.best_point), 0.0, 1.0)
-        quantiles = (0.80, 0.88, 0.92, 0.95, 0.98)
+        quantiles = (
+            (0.80, 0.88, 0.92, 0.95, 0.98, 0.985, 0.992, 0.997)
+            if self._cooperative_refinement_active()
+            else (0.80, 0.88, 0.92, 0.95, 0.98)
+        )
         spread = float(np.std(normalized_best))
-        jitter_scale = float(np.clip(0.03 * spread, 2e-4, 8e-4))
+        jitter_scale = float(
+            np.clip(
+                0.04 * spread if self._cooperative_refinement_active() else 0.03 * spread,
+                5e-4 if self._cooperative_refinement_active() else 2e-4,
+                1.5e-3 if self._cooperative_refinement_active() else 8e-4,
+            )
+        )
         candidates: list[CandidateProposal] = []
         seen: set[tuple[str, ...]] = set()
         parent_key = self._nearest_archive_key(self.best_point)
@@ -1694,6 +1924,109 @@ class PointCloudSmoothLifeSearch:
                     return candidates
         return candidates[:count]
 
+    def _cooperative_candidates(self, count: int) -> list[CandidateProposal]:
+        if count <= 0 or not self._cooperative_refinement_active():
+            return []
+        groups = self._cooperative_groups(min(int(self.config.cooperative_groups_per_batch), max(1, count // 4)))
+        if not groups:
+            return []
+        candidates: list[CandidateProposal] = []
+        normalized_best = self._normalized_point(self.best_point)
+        parent_key = self._nearest_archive_key(self.best_point)
+        axis_scores = self._cooperative_axis_scores()
+        step_base = float(
+            np.clip(
+                max(float(self.config.region_min_radius_fraction) * 100.0, min(0.02, float(self._stencil_step_fraction))),
+                5e-4,
+                0.03,
+            )
+        )
+
+        def add_candidate(normalized: np.ndarray, source: str, axes: np.ndarray, parent: tuple[str, ...] | None = parent_key) -> None:
+            if len(candidates) >= count:
+                return
+            point = self._point_from_normalized(normalized)
+            candidates.append(self._proposal(point, source, parent_key=parent, axes=tuple(int(axis) for axis in axes)))
+
+        directions: list[np.ndarray] = []
+        for direction in reversed(self._successful_directions[-4:]):
+            directions.append(np.asarray(direction, dtype=float))
+        if np.linalg.norm(self._last_successful_step) > 1e-14:
+            widths = np.maximum(self.original_bounds[:, 1] - self.original_bounds[:, 0], 1e-12)
+            directions.append(self._last_successful_step / widths)
+        for step, _gradient_delta in self._lbfgs_pairs[-2:]:
+            directions.append(np.asarray(step, dtype=float))
+
+        population_points, population_values, population_keys = self._live_population_arrays()
+        population_target = -population_values if self.smoothlife_config.maximize else population_values
+        population_order = np.argsort(population_target) if population_values.size else np.asarray([], dtype=int)
+
+        for group in groups:
+            if len(candidates) >= count:
+                break
+            axes = np.asarray(group, dtype=int)
+            axis_order = axes[np.argsort(axis_scores[axes])[::-1]]
+            for axis in axis_order[: max(1, min(3, axes.size))]:
+                direction = np.zeros(self.dimension, dtype=float)
+                direction[int(axis)] = 1.0
+                for scale in (0.35, 1.0):
+                    for sign in (1.0, -1.0):
+                        add_candidate(
+                            normalized_best + sign * step_base * scale * direction,
+                            "cooperative:group",
+                            axes,
+                        )
+                        if len(candidates) >= count:
+                            return candidates[:count]
+            for raw_direction in directions:
+                projected = np.zeros(self.dimension, dtype=float)
+                projected[axes] = raw_direction[axes]
+                norm = float(np.linalg.norm(projected))
+                if norm <= 1e-14 or not np.isfinite(norm):
+                    continue
+                projected = projected / norm
+                for sign in (1.0, -1.0):
+                    add_candidate(
+                        normalized_best + sign * step_base * projected,
+                        "cooperative:line_search",
+                        axes,
+                    )
+                    if len(candidates) >= count:
+                        return candidates[:count]
+            if population_points.shape[0] >= 4 and population_order.size > 0:
+                current_index = int(self.rng.integers(0, population_points.shape[0]))
+                elite_count = max(1, min(population_points.shape[0], int(np.ceil(0.20 * population_points.shape[0]))))
+                pbest_index = int(self.rng.choice(population_order[:elite_count]))
+                diff_indices = self.rng.choice(population_points.shape[0], size=2, replace=False)
+                current = self._normalized_point(population_points[current_index])
+                pbest = self._normalized_point(population_points[pbest_index])
+                first = self._normalized_point(population_points[int(diff_indices[0])])
+                second = self._normalized_point(population_points[int(diff_indices[1])])
+                mutant = current.copy()
+                f = float(np.clip(self._shade_f_memory[self._shade_memory_index % self._shade_f_memory.size], 0.05, 1.0))
+                mutant[axes] = current[axes] + f * (pbest[axes] - current[axes]) + 0.5 * f * (first[axes] - second[axes])
+                trial = normalized_best.copy()
+                trial[axes] = mutant[axes]
+                add_candidate(
+                    np.clip(trial, 0.0, 1.0),
+                    "cooperative:de",
+                    axes,
+                    parent=population_keys[current_index],
+                )
+                if len(candidates) >= count:
+                    return candidates[:count]
+            noise = np.zeros(self.dimension, dtype=float)
+            scale = max(step_base, float(self.config.cma_sigma_init) * 0.20)
+            noise[axes] = self.rng.normal(0.0, scale, size=axes.size)
+            add_candidate(
+                normalized_best + noise,
+                "cooperative:cma",
+                axes,
+            )
+        if len(candidates) < count:
+            candidates.extend(self._global_candidates(count - len(candidates)))
+        return candidates[:count]
+
     def _restart_candidates(self, count: int) -> list[CandidateProposal]:
         if count <= 0 or not self.config.restart_strategy_enabled or not self._evolutionary_search_active():
             return []
@@ -1929,6 +2262,7 @@ class PointCloudSmoothLifeSearch:
         candidates.extend(self._coherent_candidates(counts.get("coherent", 0)))
         candidates.extend(self._shade_candidates(counts.get("shade", 0)))
         candidates.extend(self._cma_region_candidates(counts.get("cma", 0)))
+        candidates.extend(self._cooperative_candidates(counts.get("cooperative", 0)))
         candidates.extend(self._restart_candidates(counts.get("restart", 0)))
         candidates.extend(self._exploit_candidates(counts.get("exploit", 0)))
         return candidates
@@ -2910,6 +3244,185 @@ class PointCloudSmoothLifeSearch:
             },
         )
 
+    def _run_cooperative_refinement(self) -> PointCloudBatchEvent | None:
+        if not self._cooperative_refinement_active() or self._remaining() <= 0:
+            return None
+        groups = self._cooperative_groups()
+        if not groups:
+            return None
+        before = len(self.archive)
+        best_before = float(self.best_value)
+        group_size = self._cooperative_group_size()
+        max_new = min(int(self._effective_batch_size()), self._remaining())
+        source_attempts: Counter[str] = Counter()
+        source_counts: Counter[str] = Counter()
+        source_improvements: Counter[str] = Counter()
+        source_amounts: Counter[str] = Counter()
+        improvements = 0
+        groups_used = 0
+        widths = np.maximum(self.original_bounds[:, 1] - self.original_bounds[:, 0], 1e-12)
+        step_floor = max(float(self.config.region_min_radius_fraction) * 100.0, 5e-4)
+        step_base = float(np.clip(max(step_floor, min(float(self._stencil_step_fraction), 0.015)), 5e-4, 0.025))
+
+        def evaluate(normalized: np.ndarray, source: str, axes: np.ndarray) -> bool:
+            nonlocal improvements
+            if self._remaining() <= 0 or len(self.archive) - before >= max_new:
+                return False
+            current_before = float(self.best_value)
+            point = self._point_from_normalized(normalized)
+            source_attempts[source] += 1
+            self._axis_coverage[axes] += 1.0
+            value, added, improved = self._evaluate_point(point, source=source)
+            if not added:
+                return False
+            source_counts[source] += 1
+            if improved and value is not None:
+                amount = max(0.0, self._target(current_before) - self._target(float(value)))
+                source_improvements[source] += 1
+                source_amounts[source] += amount
+                improvements += 1
+                self._axis_activity *= 0.999
+                self._axis_activity[axes] += max(amount, 1e-12)
+                return True
+            return False
+
+        passes = 0
+        while len(self.archive) - before < max_new and self._remaining() > 0 and passes < 2:
+            passes += 1
+            improved_this_pass = False
+            axis_scores = self._cooperative_axis_scores()
+            group_quota = max(4, int(np.ceil(max_new / max(len(groups), 1))))
+            for axes in groups:
+                if len(self.archive) - before >= max_new or self._remaining() <= 0:
+                    break
+                group_before = len(self.archive)
+                groups_used += 1
+                normalized_center = self._normalized_point(self.best_point)
+                ordered_axes = axes[np.argsort(axis_scores[axes])[::-1]]
+                for axis in ordered_axes:
+                    if (
+                        len(self.archive) - before >= max_new
+                        or len(self.archive) - group_before >= group_quota
+                        or self._remaining() <= 0
+                    ):
+                        break
+                    direction = np.zeros(self.dimension, dtype=float)
+                    direction[int(axis)] = 1.0
+                    accepted_axis = False
+                    for sign in (1.0, -1.0):
+                        alpha = step_base * 0.25
+                        misses = 0
+                        for _trial in range(6):
+                            if (
+                                len(self.archive) - before >= max_new
+                                or len(self.archive) - group_before >= group_quota
+                                or self._remaining() <= 0
+                            ):
+                                break
+                            if evaluate(
+                                normalized_center + sign * alpha * direction,
+                                "cooperative:line_search",
+                                axes,
+                            ):
+                                step_direction = (self.best_point - self._point_from_normalized(normalized_center)) / widths
+                                norm = float(np.linalg.norm(step_direction))
+                                if norm > 1e-14 and np.isfinite(norm):
+                                    pattern = self._normalized_point(self.best_point) + min(alpha * 1.35, 0.08) * step_direction / norm
+                                    evaluate(pattern, "cooperative:group", axes)
+                                normalized_center = self._normalized_point(self.best_point)
+                                accepted_axis = True
+                                improved_this_pass = True
+                                alpha = min(alpha * 1.70, 0.08)
+                                misses = 0
+                                continue
+                            misses += 1
+                            alpha = min(alpha * 2.0, 0.08)
+                            if misses >= 2:
+                                break
+                        if (
+                            len(self.archive) - before >= max_new
+                            or len(self.archive) - group_before >= group_quota
+                            or self._remaining() <= 0
+                        ):
+                            break
+                    if accepted_axis:
+                        normalized_center = self._normalized_point(self.best_point)
+                direction_candidates: list[np.ndarray] = []
+                for direction in reversed(self._successful_directions[-4:]):
+                    projected = np.zeros(self.dimension, dtype=float)
+                    projected[axes] = np.asarray(direction, dtype=float)[axes]
+                    norm = float(np.linalg.norm(projected))
+                    if norm > 1e-14 and np.isfinite(norm):
+                        direction_candidates.append(projected / norm)
+                if self._lbfgs_pairs:
+                    for step, _gradient_delta in self._lbfgs_pairs[-2:]:
+                        projected = np.zeros(self.dimension, dtype=float)
+                        projected[axes] = step[axes]
+                        norm = float(np.linalg.norm(projected))
+                        if norm > 1e-14 and np.isfinite(norm):
+                            direction_candidates.append(projected / norm)
+                for direction in direction_candidates[:3]:
+                    if (
+                        len(self.archive) - before >= max_new
+                        or len(self.archive) - group_before >= group_quota
+                        or self._remaining() <= 0
+                    ):
+                        break
+                    normalized_center = self._normalized_point(self.best_point)
+                    for sign in (1.0, -1.0):
+                        if evaluate(
+                            normalized_center + sign * step_base * direction,
+                            "cooperative:line_search",
+                            axes,
+                        ):
+                            improved_this_pass = True
+                            break
+                    if improved_this_pass:
+                        break
+            if improved_this_pass:
+                self._stencil_step_fraction = min(
+                    float(self.config.region_initial_radius_fraction),
+                    max(float(self._stencil_step_fraction), step_base * 1.15),
+                )
+                groups = self._cooperative_groups()
+                continue
+            self._stencil_step_fraction = max(float(self.config.region_min_radius_fraction), self._stencil_step_fraction * 0.75)
+            break
+        after = len(self.archive)
+        if after == before:
+            return None
+        self._record_source_results(source_attempts, source_counts, source_improvements, source_amounts)
+        self._refresh_live_population()
+        top_axes = np.argsort(self._cooperative_axis_scores())[::-1][: min(8, self.dimension)]
+        return PointCloudBatchEvent(
+            batch_index=self._batch_index,
+            kind="cooperative_refinement",
+            evaluations_before=before,
+            evaluations_after=after,
+            candidate_count=int(sum(source_attempts.values())),
+            source_counts=dict(source_counts),
+            best_before=best_before,
+            best_after=float(self.best_value),
+            best_point=self.best_point.copy(),
+            improved=self._is_better(self.best_value, best_before),
+            diagnostics={
+                "improvements": int(improvements),
+                "source_improvements": dict(source_improvements),
+                "source_improvement_amounts": dict(source_amounts),
+                "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
+                "active_set_size": int(self._active_set_axes().size),
+                "cooperative_groups_used": int(groups_used),
+                "cooperative_improvements": int(improvements),
+                "active_set_expansions": int(self._active_set_expansions),
+                "axis_coverage_max": float(np.max(self._axis_coverage)) if self._axis_coverage.size else 0.0,
+                "top_axis_scores": [
+                    {"axis": int(axis), "score": float(self._cooperative_axis_scores()[axis])}
+                    for axis in top_axes
+                ],
+                "archive_size": int(after),
+            },
+        )
+
     def _run_stencil_refinement(self) -> PointCloudBatchEvent | None:
         if not np.isfinite(self.best_value) or self._remaining() <= 0:
             return None
@@ -3040,6 +3553,8 @@ class PointCloudSmoothLifeSearch:
                 "anchor_baseline_target": (
                     None if self._anchor_baseline_target is None else float(self._anchor_baseline_target)
                 ),
+                "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
+                "active_set_size": int(self._active_set_axes().size) if self._cooperative_refinement_active() else 0,
             },
         )
         self.snapshots.append(snapshot)
@@ -3091,6 +3606,11 @@ class PointCloudSmoothLifeSearch:
             self._update_portfolio()
             candidate_points = np.asarray([point for point, _source in candidates], dtype=float) if candidates else None
             self._capture_snapshot(candidate_points=candidate_points)
+            cooperative_refinement = self._run_cooperative_refinement()
+            if cooperative_refinement is not None:
+                self.batch_events.append(cooperative_refinement)
+                self._update_portfolio()
+                self._capture_snapshot(force=True)
             refinement = None
             if event.improved or not self._local_refinement_stalled:
                 refinement = self._run_local_refinement()
@@ -3117,6 +3637,7 @@ class PointCloudSmoothLifeSearch:
                 self._capture_snapshot(force=True)
             if (
                 event.evaluations_after == event.evaluations_before
+                and cooperative_refinement is None
                 and refinement is None
                 and direction_refinement is None
                 and stencil_refinement is None
@@ -3175,6 +3696,14 @@ class PointCloudSmoothLifeSearch:
                     "linkage_neighbor_count": int(self.config.linkage_neighbor_count),
                     "cross_block_lbfgs_enabled": bool(self.config.cross_block_lbfgs_enabled),
                     "cross_block_lbfgs_memory_size": int(self.config.cross_block_lbfgs_memory_size),
+                    "cooperative_refinement_enabled": bool(self.config.cooperative_refinement_enabled),
+                    "cooperative_min_dimension": int(self.config.cooperative_min_dimension),
+                    "cooperative_group_size": (
+                        None if self.config.cooperative_group_size is None else int(self.config.cooperative_group_size)
+                    ),
+                    "cooperative_groups_per_batch": int(self.config.cooperative_groups_per_batch),
+                    "active_set_max_fraction": float(self.config.active_set_max_fraction),
+                    "active_set_expand_interval_batches": int(self.config.active_set_expand_interval_batches),
                     "early_stop_enabled": bool(self.config.early_stop_enabled),
                     "early_stop_value": (
                         None
@@ -3202,6 +3731,10 @@ class PointCloudSmoothLifeSearch:
                 "probe_recenters": int(self._probe_recenters_total),
                 "linkage_score_max": float(np.max(self._linkage_scores)) if self._linkage_scores.size else 0.0,
                 "lbfgs_pairs": int(len(self._lbfgs_pairs)),
+                "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
+                "active_set_size": int(self._active_set_axes().size) if self._cooperative_refinement_active() else 0,
+                "active_set_expansions": int(self._active_set_expansions),
+                "axis_coverage_max": float(np.max(self._axis_coverage)) if self._axis_coverage.size else 0.0,
                 "stop_reason": self._stop_reason,
                 "local_refinement_stalled": bool(self._local_refinement_stalled),
                 "active_region_count": int(len(self._active_regions())),

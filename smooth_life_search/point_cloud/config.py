@@ -90,6 +90,12 @@ class PointCloudSearchConfig:
     linkage_neighbor_count: int = 3
     cross_block_lbfgs_enabled: bool = True
     cross_block_lbfgs_memory_size: int = 16
+    cooperative_refinement_enabled: bool = True
+    cooperative_min_dimension: int = 100
+    cooperative_group_size: int | None = None
+    cooperative_groups_per_batch: int = 4
+    active_set_max_fraction: float = 0.25
+    active_set_expand_interval_batches: int = 4
     best_improvement_tolerance: float = 0.0
     snapshot_interval_batches: int = 16
 
@@ -229,6 +235,16 @@ class PointCloudSearchConfig:
             raise ValueError("linkage_neighbor_count must be positive")
         if self.cross_block_lbfgs_memory_size <= 0:
             raise ValueError("cross_block_lbfgs_memory_size must be positive")
+        if self.cooperative_min_dimension < 2:
+            raise ValueError("cooperative_min_dimension must be >= 2")
+        if self.cooperative_group_size is not None and self.cooperative_group_size <= 0:
+            raise ValueError("cooperative_group_size must be positive when set")
+        if self.cooperative_groups_per_batch <= 0:
+            raise ValueError("cooperative_groups_per_batch must be positive")
+        if not 0.0 < self.active_set_max_fraction <= 1.0:
+            raise ValueError("active_set_max_fraction must be in (0, 1]")
+        if self.active_set_expand_interval_batches <= 0:
+            raise ValueError("active_set_expand_interval_batches must be positive")
         if self.best_improvement_tolerance < 0.0:
             raise ValueError("best_improvement_tolerance must be non-negative")
         if self.snapshot_interval_batches <= 0:

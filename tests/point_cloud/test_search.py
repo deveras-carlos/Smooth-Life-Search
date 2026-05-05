@@ -504,6 +504,104 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
         bad._store_lbfgs_pair(step, -gradient_delta)
         self.assertEqual(len(bad._lbfgs_pairs), 0)
 
+    def test_cooperative_active_set_scores_are_finite_and_deterministic(self) -> None:
+        first = self._high_dimensional_search(dimension=120, seed=21)
+        second = self._high_dimensional_search(dimension=120, seed=21)
+        first._axis_activity[[3, 9]] = [2.0, 1.0]
+        second._axis_activity[[3, 9]] = [2.0, 1.0]
+
+        first_scores = first._cooperative_axis_scores()
+        second_scores = second._cooperative_axis_scores()
+        first_axes = first._active_set_axes()
+        second_axes = second._active_set_axes()
+
+        self.assertTrue(np.all(np.isfinite(first_scores)))
+        self.assertTrue(np.allclose(first_scores, second_scores))
+        self.assertTrue(np.array_equal(first_axes, second_axes))
+        self.assertLessEqual(first_axes.size, int(np.ceil(0.25 * 120)))
+
+    def test_cooperative_active_set_expansion_preserves_coverage_pressure(self) -> None:
+        search = self._high_dimensional_search(dimension=120, seed=22)
+        search._axis_coverage[:] = 10.0
+        search._axis_coverage[[17, 43]] = 0.0
+        search._batch_index = 10
+
+        axes = search._active_set_axes()
+
+        self.assertIn(17, axes.tolist())
+        self.assertIn(43, axes.tolist())
+        self.assertGreater(search._active_set_expansions, 0)
+
+    def test_cooperative_candidates_are_bounded_and_modify_only_group_axes(self) -> None:
+        search = self._high_dimensional_search(dimension=120, seed=23)
+        search.best_point = np.linspace(-1.0, 1.0, 120)
+        candidates = search._cooperative_candidates(16)
+
+        self.assertTrue(candidates)
+        for proposal in candidates:
+            self.assertIsNotNone(proposal.axes)
+            self.assertTrue(proposal.source.startswith("cooperative:") or proposal.source == "global")
+            self.assertTrue(np.all(proposal.point >= -10.0))
+            self.assertTrue(np.all(proposal.point <= 10.0))
+            if proposal.axes is None or proposal.source == "global":
+                continue
+            changed = np.flatnonzero(np.abs(proposal.point - search.best_point) > 1e-12)
+            self.assertTrue(set(changed).issubset(set(proposal.axes)))
+
+    def test_cooperative_groups_use_linkage_and_coverage(self) -> None:
+        search = self._high_dimensional_search(dimension=120, seed=24)
+        search.config.linkage_neighbor_count = 1
+        before = np.zeros(120, dtype=float)
+        after = np.zeros(120, dtype=float)
+        after[[5, 77]] = 1.0
+        search._record_successful_direction(before, after)
+        search._axis_activity[5] = 10.0
+        search._axis_coverage[:] = 5.0
+        search._axis_coverage[91] = 0.0
+
+        groups = search._cooperative_groups(4)
+        flattened = {int(axis) for group in groups for axis in group}
+
+        self.assertTrue(any(5 in group.tolist() and 77 in group.tolist() for group in groups))
+        self.assertIn(91, flattened)
+
+    def test_cooperative_refinement_improves_shifted_quadratic_without_local_refinement(self) -> None:
+        target = np.ones(120, dtype=float)
+        search = PointCloudSmoothLifeSearch(
+            lambda point: float(np.sum(np.square(point - target))),
+            [(-5.0, 5.0)] * 120,
+            SmoothLifeConfig(grid_shape=(32, 32), store_all_snapshots=False),
+            PointCloudSearchConfig(
+                max_evaluations=260,
+                initial_design_size=32,
+                batch_size=32,
+                local_refinement_enabled=False,
+                cooperative_min_dimension=100,
+            ),
+        )
+        search.reset(seed=25)
+        search._batch_index = 1
+        search._evaluate_point(np.zeros(120, dtype=float), source="center")
+        before = float(search.best_value)
+
+        event = search._run_cooperative_refinement()
+
+        self.assertIsNotNone(event)
+        self.assertLess(search.best_value, before)
+        self.assertGreater(event.diagnostics["cooperative_improvements"], 0)
+        self.assertIn("cooperative:line_search", event.source_counts)
+
+    def test_disabling_cooperative_refinement_removes_large_d_allocation(self) -> None:
+        enabled = self._high_dimensional_search(dimension=120, seed=26)
+        disabled = self._high_dimensional_search(dimension=120, seed=26)
+        disabled.config.cooperative_refinement_enabled = False
+
+        enabled_counts = enabled._candidate_counts(100)
+        disabled_counts = disabled._candidate_counts(100)
+
+        self.assertGreater(enabled_counts.get("cooperative", 0), 0)
+        self.assertEqual(disabled_counts.get("cooperative", 0), 0)
+
     def test_python_api_requires_budget(self) -> None:
         search = PointCloudSmoothLifeSearch(
             sphere,

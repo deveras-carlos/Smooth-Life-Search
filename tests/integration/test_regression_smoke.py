@@ -152,7 +152,7 @@ class TestPointCloudRegressionSmoke(unittest.TestCase):
         self.assertLess(payload["best_value"], 1e-10)
 
     def test_rosenbrock_30d_and_50d_seed7_6400_improve_without_scout_shortcut(self) -> None:
-        cases = [(30, 1.0), (50, 0.05), (100, 90.0)]
+        cases = [(30, 1.0), (50, 0.05), (100, 1.0)]
         for dimension, threshold in cases:
             with self.subTest(dimension=dimension):
                 payload = _run_cli_case("rosenbrock", 6400, dimension=dimension)
@@ -172,7 +172,7 @@ class TestPointCloudRegressionSmoke(unittest.TestCase):
     def test_rosenbrock_500d_seed7_6400_beats_center_baseline(self) -> None:
         payload = _run_cli_case("rosenbrock", 6400, dimension=500)
 
-        self.assertLess(payload["best_value"], 490.0)
+        self.assertLess(payload["best_value"], 450.0)
         self.assertGreater(payload["best_value"], 0.0)
 
 

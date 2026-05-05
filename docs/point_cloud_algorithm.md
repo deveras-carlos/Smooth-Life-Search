@@ -86,6 +86,10 @@ into the full coordinate space around the current incumbent or active region.
   `direction_refinement_max_evaluations`, `linkage_blocks_enabled`,
   `linkage_update_interval_batches`, `linkage_neighbor_count`,
   `cross_block_lbfgs_enabled`, and `cross_block_lbfgs_memory_size`.
+- Large-D cooperative propagation is controlled by
+  `cooperative_refinement_enabled`, `cooperative_min_dimension`,
+  `cooperative_group_size`, `cooperative_groups_per_batch`,
+  `active_set_max_fraction`, and `active_set_expand_interval_batches`.
 - Local refinement methods are `bfgs`, `levenberg-marquardt`, and `hybrid`.
 - Default CLI runs exhaust their requested budget for global-search
   diagnostics. Use `--target-value 1e-11` for Rosenbrock-style runs where
@@ -98,6 +102,28 @@ into the full coordinate space around the current incumbent or active region.
 - Himmelblau remains restricted to 2D.
 - GIF and GUI rendering remain 2D because snapshots still use projected density
   dashboards.
+
+## Large-D Propagation Checkpoint
+
+- The 30D and 50D Rosenbrock cases are already basin-polishing problems; they
+  stay covered by the existing local/block/direction regression checks.
+- 100D and 500D need propagation through many coordinate groups. Cooperative
+  active-set refinement keeps a capped set of promising and under-covered axes,
+  adds frontier coordinate windows, and runs derivative-free group probes in the
+  current incumbent context.
+- Coherent high-D probes are archive-derived and jittered, so they can test
+  broad coordinate-level hypotheses without reintroducing exact constant
+  diagonal restart scouts.
+
+Recommended no-GIF smoke commands:
+
+```bash
+smooth-life-search point-cloud --objective rosenbrock --dimension 100 --seed 7 --budget 6400
+smooth-life-search point-cloud --objective rosenbrock --dimension 500 --seed 7 --budget 6400
+```
+
+Latest checkpoint values for those commands are below `1.0` for 100D and
+approximately `1.9e1` for 500D; both remain budget-exhausting diagnostic runs.
 - Full quadratic surrogates are used only up to the configured dimension
   cutoff. Higher-dimensional fits use a diagonal/linear fallback and are
   rejected safely when the fit is underdetermined or ill-conditioned.
