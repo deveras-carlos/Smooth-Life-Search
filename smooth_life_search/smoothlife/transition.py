@@ -60,6 +60,12 @@ def smoothlife_transition(
     outer_fill: np.ndarray,
     config: SmoothLifeConfig,
     objective_field: np.ndarray | None = None,
+    advantage_field: np.ndarray | None = None,
+    direction_field: np.ndarray | None = None,
+    local_credit_field: np.ndarray | None = None,
+    advantage_strength: float = 0.0,
+    direction_strength: float = 0.0,
+    local_credit_strength: float = 0.0,
 ) -> tuple[ np.ndarray, np.ndarray ]:
     """Return the signed target state and the target vitality field."""
 
@@ -73,4 +79,18 @@ def smoothlife_transition(
     target_magnitude = 1.0 - life_support
     polarity = _resolve_polarity( field )
     target_state = polarity * target_magnitude
+    if config.run_mode != "simulation":
+        if advantage_field is not None and advantage_strength > 0.0:
+            advantage = np.clip(np.nan_to_num(advantage_field, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
+            target_state += float(advantage_strength) * advantage
+        if direction_field is not None and direction_strength > 0.0:
+            direction = np.clip(np.nan_to_num(direction_field, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
+            target_state += float(direction_strength) * direction
+        if local_credit_field is not None and local_credit_strength > 0.0:
+            local_credit = np.clip(
+                np.nan_to_num(local_credit_field, nan=0.0, posinf=1.0, neginf=-1.0),
+                -1.0,
+                1.0,
+            )
+            target_state += float(local_credit_strength) * local_credit
     return np.clip( target_state, -1.0, 1.0 ), target_vitality

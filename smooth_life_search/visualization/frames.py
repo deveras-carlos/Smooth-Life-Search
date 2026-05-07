@@ -100,6 +100,7 @@ def _local_best_history_points( run: SearchRun | None, frame_index: int ) -> lis
 def _footer_text( snapshot: SmoothLifeSnapshot, frame_index: int ) -> str:
     bounds = snapshot.bounds
     evals = int( snapshot.metadata.get( "evaluations", 0 ) )
+    mode = str( snapshot.metadata.get( "mode", "" ) )
     explored_fraction = float( snapshot.metadata.get( "explored_fraction", 0.0 ) )
     decision = str( snapshot.metadata.get( "zoom_decision", "none" ) )
     best_text = format( snapshot.best_value, ".6f" )
@@ -110,6 +111,12 @@ def _footer_text( snapshot: SmoothLifeSnapshot, frame_index: int ) -> str:
     x1_text = format( bounds[ 0, 1 ], ".4f" )
     y0_text = format( bounds[ 1, 0 ], ".4f" )
     y1_text = format( bounds[ 1, 1 ], ".4f" )
+    if mode == "matrix":
+        shape = snapshot.metadata.get( "matrix_shape", [ int( snapshot.field.shape[ 0 ] ), int( snapshot.field.shape[ 1 ] ) ] )
+        return (
+            f"frame { frame_index + 1 }   step={ snapshot.step_index }   evals={ evals }   matrix={ shape }\n"
+            f"global best={ best_text }   reward/support is rendered in genome-cell space"
+        )
     return (
         f"frame { frame_index + 1 }   step={ snapshot.step_index }   evals={ evals }   explored={ explored_text }   decision={ decision }\n"
         f"global best={ best_text }   local best={ local_text }   box best={ box_text }    "
@@ -130,20 +137,6 @@ def _draw_group_overlays( draw: ImageDraw.ImageDraw, snapshot: SmoothLifeSnapsho
         draw.text( ( x + 4, y + 4 ), f"#{ rank_text } d={ density_text }", fill=_TEXT_PRIMARY )
 
 
-def _draw_point_cloud_overlays( draw: ImageDraw.ImageDraw, snapshot: SmoothLifeSnapshot, image_size: tuple[ int, int ] ) -> None:
-    archive_points = getattr( snapshot, "archive_points", None )
-    if archive_points is not None:
-        points = np.asarray( archive_points, dtype=float )
-        if points.ndim == 2 and points.shape[1] == 2:
-            for point in points[-250:]:
-                x, y = world_to_image_xy( point, snapshot.bounds, image_size )
-                draw.rectangle( ( x - 1, y - 1, x + 1, y + 1 ), fill=( 210, 215, 222 ) )
-    for bbox_world in getattr( snapshot, "region_bounds", [ ] ):
-        bbox = np.asarray( bbox_world, dtype=float )
-        if bbox.shape == ( 2, 2 ):
-            draw_bbox( draw, bbox, snapshot.bounds, image_size, color=_ZOOM_BOX )
-
-
 def snapshot_to_image(
     snapshot: SmoothLifeSnapshot,
     scale: int = 2,
@@ -154,6 +147,7 @@ def snapshot_to_image(
     """Render one snapshot as a multi-panel dashboard image."""
 
     resolved_index = 0 if frame_index is None else int( frame_index )
+    mode = str( snapshot.metadata.get( "mode", "" ) )
     field_panel = _resized_panel( _palette_image( snapshot.field, "signed", signed=True ), scale )
     objective_panel = _resized_panel(
         _masked_palette_image( snapshot.objective_field, "objective", snapshot.evaluated_mask, _UNEXPLORED ),
@@ -163,48 +157,48 @@ def snapshot_to_image(
     transition_panel = _resized_panel( _palette_image( snapshot.transition_field, "signed", signed=True ), scale )
     vitality_panel = _resized_panel( _palette_image( np.clip( 1.0 - np.abs( snapshot.field ), 0.0, 1.0 ), "vitality" ), scale )
 
-    history_points = _local_best_history_points( run, resolved_index )
+    history_points = [ ] if mode == "matrix" else _local_best_history_points( run, resolved_index )
     field_draw = ImageDraw.Draw( field_panel )
-    draw_world_path(
-        field_draw,
-        history_points,
-        snapshot.bounds,
-        field_panel.size,
-        color=_PATH_COLOR,
-        width=2,
-    )
-    draw_point_marker(
-        field_draw,
-        snapshot.local_best_point,
-        snapshot.bounds,
-        field_panel.size,
-        color=_LOCAL_COLOR,
-        radius=5,
-    )
-    draw_point_marker(
-        field_draw,
-        snapshot.box_best_point,
-        snapshot.bounds,
-        field_panel.size,
-        color=_BOX_COLOR,
-        radius=4,
-    )
-    if snapshot.selected_basin_bbox is not None:
+    if mode != "matrix":
+        draw_world_path(
+            field_draw,
+            history_points,
+            snapshot.bounds,
+            field_panel.size,
+            color=_PATH_COLOR,
+            width=2,
+        )
+        draw_point_marker(
+            field_draw,
+            snapshot.local_best_point,
+            snapshot.bounds,
+            field_panel.size,
+            color=_LOCAL_COLOR,
+            radius=5,
+        )
+        draw_point_marker(
+            field_draw,
+            snapshot.box_best_point,
+            snapshot.bounds,
+            field_panel.size,
+            color=_BOX_COLOR,
+            radius=4,
+        )
+    if mode != "matrix" and snapshot.selected_basin_bbox is not None:
         draw_bbox( field_draw, snapshot.selected_basin_bbox, snapshot.bounds, field_panel.size, color=_ZOOM_BOX )
 
     support_draw = ImageDraw.Draw( support_panel )
-    if str( snapshot.metadata.get( "mode", "" ) ) == "point-cloud":
-        _draw_point_cloud_overlays( support_draw, snapshot, support_panel.size )
-    else:
+    if mode != "matrix":
         _draw_group_overlays( support_draw, snapshot, support_panel.size )
-    draw_point_marker(
-        support_draw,
-        snapshot.best_point,
-        snapshot.bounds,
-        support_panel.size,
-        color=_GLOBAL_COLOR,
-        radius=5,
-    )
+    if mode != "matrix":
+        draw_point_marker(
+            support_draw,
+            snapshot.best_point,
+            snapshot.bounds,
+            support_panel.size,
+            color=_GLOBAL_COLOR,
+            radius=5,
+        )
 
     convergence_panel = build_convergence_panel( run, resolved_index, field_panel.size )
 
@@ -233,13 +227,13 @@ def snapshot_to_image(
         font=font,
     )
 
-    if str( snapshot.metadata.get( "mode", "" ) ) == "point-cloud":
+    if mode == "matrix":
         panel_specs = [
-            ( field_panel, "proposal density + path", 0, 0 ),
-            ( objective_panel, "archive desirability view", 0, 1 ),
-            ( support_panel, "archive + regions", 0, 2 ),
-            ( transition_panel, "density transition view", 1, 0 ),
-            ( vitality_panel, "density vitality", 1, 1 ),
+            ( field_panel, "matrix genome field", 0, 0 ),
+            ( objective_panel, "reward support field", 0, 1 ),
+            ( support_panel, "vitality-weighted support", 0, 2 ),
+            ( transition_panel, "SmoothLife transition", 1, 0 ),
+            ( vitality_panel, "matrix vitality", 1, 1 ),
             ( convergence_panel, "convergence", 1, 2 ),
         ]
     else:
@@ -267,6 +261,9 @@ def snapshot_to_image(
 
     footer_top = canvas_height - _FOOTER_HEIGHT + 10
     draw.text( ( _PANEL_MARGIN, footer_top ), _footer_text( snapshot, resolved_index ), fill=_TEXT_PRIMARY, font=font )
-    footer_note = "Archive samples are light marks and red boxes show adaptive proposal regions." if str( snapshot.metadata.get( "mode", "" ) ) == "point-cloud" else "Unexplored pixels are dark in the objective panel. Red boxes show dense groups; gray convergence markers indicate deferred zoom decisions."
+    if mode == "matrix":
+        footer_note = "Each objective evaluation decodes the full SmoothLife matrix into one N-D candidate."
+    else:
+        footer_note = "Unexplored pixels are dark in the objective panel. Red boxes show dense groups; gray convergence markers indicate deferred zoom decisions."
     draw.text( ( _PANEL_MARGIN, footer_top + 34 ), footer_note, fill=_TEXT_SECONDARY, font=font )
     return canvas

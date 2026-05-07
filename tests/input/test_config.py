@@ -6,9 +6,9 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 
-from smooth_life_search import PointCloudSearchConfig
+from smooth_life_search import MatrixSmoothLifeConfig
 from smooth_life_search.input import load_config_file, merge_config_overrides
-from smooth_life_search.input.cli import _build_configs, build_parser, run_point_cloud_command
+from smooth_life_search.input.cli import _build_configs, build_parser, run_matrix_command
 
 
 class TestConfigLoading(unittest.TestCase):
@@ -16,11 +16,11 @@ class TestConfigLoading(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             json_path = Path(tmpdir) / "run.json"
             toml_path = Path(tmpdir) / "run.toml"
-            json_path.write_text('{"command": "run", "budget": 100}', encoding="utf-8")
-            toml_path.write_text('command = "run"\nbudget = 200\n', encoding="utf-8")
+            json_path.write_text('{"command": "matrix", "budget": 100}', encoding="utf-8")
+            toml_path.write_text('command = "matrix"\nbudget = 200\n', encoding="utf-8")
 
-            self.assertEqual(load_config_file(json_path), {"command": "run", "budget": 100})
-            self.assertEqual(load_config_file(toml_path), {"command": "run", "budget": 200})
+            self.assertEqual(load_config_file(json_path), {"command": "matrix", "budget": 100})
+            self.assertEqual(load_config_file(toml_path), {"command": "matrix", "budget": 200})
 
     def test_rejects_unknown_extension_and_non_object_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -38,422 +38,219 @@ class TestConfigLoading(unittest.TestCase):
         merged = merge_config_overrides({"budget": 100, "seed": 1}, {"budget": None, "seed": 7})
         self.assertEqual(merged, {"budget": 100, "seed": 7})
 
-    def test_cli_point_cloud_defaults_match_config_defaults(self) -> None:
-        args = build_parser().parse_args(["point-cloud", "--objective", "sphere", "--budget", "100"])
-        defaults = PointCloudSearchConfig()
+    def test_cli_matrix_defaults_match_config_defaults(self) -> None:
+        args = build_parser().parse_args(["matrix", "--objective", "sphere", "--budget", "100"])
+        defaults = MatrixSmoothLifeConfig()
 
-        self.assertEqual(args.batch_size, defaults.batch_size)
-        self.assertEqual(args.initial_design_size, defaults.initial_design_size)
-        self.assertEqual(args.portfolio_size, defaults.portfolio_size)
-        self.assertEqual(args.density_grid_height, defaults.density_grid_shape[0])
-        self.assertEqual(args.density_grid_width, defaults.density_grid_shape[1])
-        self.assertEqual(args.trust_regions_enabled, defaults.trust_regions_enabled)
-        self.assertEqual(args.surrogate_enabled, defaults.surrogate_enabled)
-        self.assertEqual(args.local_refinement_enabled, defaults.local_refinement_enabled)
-        self.assertEqual(args.local_refinement_max_evaluations, defaults.local_refinement_max_evaluations)
+        self.assertEqual(args.max_steps, defaults.max_steps)
+        self.assertIsNone(args.matrix_height)
+        self.assertIsNone(args.matrix_width)
+        self.assertEqual(args.decoder, defaults.decoder)
+        self.assertEqual(args.decoder_gain, defaults.decoder_gain)
+        self.assertEqual(args.projection_seed_offset, defaults.projection_seed_offset)
+        self.assertEqual(args.cell_alive_threshold, defaults.cell_alive_threshold)
+        self.assertEqual(args.local_decoder_block_size, defaults.local_decoder_block_size)
+        self.assertEqual(args.local_decoder_overlap, defaults.local_decoder_overlap)
+        self.assertEqual(args.local_credit_enabled, defaults.local_credit_enabled)
+        self.assertEqual(args.local_credit_strength, defaults.local_credit_strength)
+        self.assertEqual(args.local_credit_learning_rate, defaults.local_credit_learning_rate)
+        self.assertEqual(args.local_credit_decay, defaults.local_credit_decay)
+        self.assertEqual(args.local_credit_clip, defaults.local_credit_clip)
+        self.assertEqual(args.patch_probe_enabled, defaults.patch_probe_enabled)
+        self.assertEqual(args.patch_probe_interval_evaluations, defaults.patch_probe_interval_evaluations)
+        self.assertEqual(args.patch_probe_count, defaults.patch_probe_count)
+        self.assertEqual(args.patch_probe_step, defaults.patch_probe_step)
+        self.assertEqual(args.steps_per_evaluation, defaults.steps_per_evaluation)
+        self.assertEqual(args.elite_pull_strength, defaults.elite_pull_strength)
+        self.assertEqual(args.failure_damping, defaults.failure_damping)
+        self.assertEqual(args.reward_decay, defaults.reward_decay)
+        self.assertEqual(args.reward_boost, defaults.reward_boost)
+        self.assertEqual(args.mutation_noise, defaults.mutation_noise)
+        self.assertEqual(args.mutation_decay, defaults.mutation_decay)
+        self.assertEqual(args.advantage_strength, defaults.advantage_strength)
+        self.assertEqual(args.advantage_decay, defaults.advantage_decay)
+        self.assertEqual(args.direction_strength, defaults.direction_strength)
+        self.assertEqual(args.direction_decay, defaults.direction_decay)
+        self.assertEqual(args.temperature_init, defaults.temperature_init)
+        self.assertEqual(args.temperature_decay, defaults.temperature_decay)
+        self.assertEqual(args.temperature_reheat, defaults.temperature_reheat)
+        self.assertEqual(args.stagnation_reheat_evaluations, defaults.stagnation_reheat_evaluations)
+        self.assertEqual(args.matrix_line_search_enabled, defaults.matrix_line_search_enabled)
+        self.assertEqual(args.matrix_line_search_alphas, defaults.matrix_line_search_alphas)
         self.assertEqual(args.early_stop_enabled, defaults.early_stop_enabled)
         self.assertEqual(args.early_stop_value, defaults.early_stop_value)
         self.assertIsNone(args.target_value)
-        self.assertEqual(args.region_stall_patience, defaults.region_stall_patience)
-        self.assertEqual(args.region_cooldown_batches, defaults.region_cooldown_batches)
-        self.assertEqual(args.global_exploration_floor, defaults.global_exploration_floor)
-        self.assertEqual(args.region_stencil_fraction, defaults.region_stencil_fraction)
-        self.assertEqual(args.anisotropic_regions_enabled, defaults.anisotropic_regions_enabled)
-        self.assertEqual(args.region_anisotropy_max, defaults.region_anisotropy_max)
-        self.assertEqual(args.region_geometry_min_samples, defaults.region_geometry_min_samples)
-        self.assertEqual(args.local_refinement_method, defaults.local_refinement_method)
-        self.assertEqual(args.local_refinement_damping, defaults.local_refinement_damping)
-        self.assertEqual(args.active_subspace_size, defaults.active_subspace_size)
-        self.assertEqual(
-            args.surrogate_full_quadratic_max_dimension,
-            defaults.surrogate_full_quadratic_max_dimension,
-        )
-        self.assertEqual(args.projection_axes, defaults.projection_axes)
-        self.assertEqual(args.projection_ensemble_enabled, defaults.projection_ensemble_enabled)
-        self.assertEqual(args.projection_ensemble_size, defaults.projection_ensemble_size)
-        self.assertEqual(args.projection_ensemble_refresh_batches, defaults.projection_ensemble_refresh_batches)
-        self.assertEqual(args.coherent_probes_enabled, defaults.coherent_probes_enabled)
-        self.assertEqual(args.surrogate_ranking_enabled, defaults.surrogate_ranking_enabled)
-        self.assertEqual(args.candidate_pool_multiplier, defaults.candidate_pool_multiplier)
-        self.assertEqual(args.surrogate_ranking_neighbor_count, defaults.surrogate_ranking_neighbor_count)
-        self.assertEqual(args.surrogate_reliability_enabled, defaults.surrogate_reliability_enabled)
-        self.assertEqual(args.surrogate_rank_weight_min, defaults.surrogate_rank_weight_min)
-        self.assertEqual(args.surrogate_rank_weight_max, defaults.surrogate_rank_weight_max)
-        self.assertEqual(args.probe_recenter_enabled, defaults.probe_recenter_enabled)
-        self.assertEqual(args.probe_recenter_max_restarts, defaults.probe_recenter_max_restarts)
-        self.assertEqual(args.basin_polishing_enabled, defaults.basin_polishing_enabled)
-        self.assertEqual(args.basin_polishing_min_dimension, defaults.basin_polishing_min_dimension)
-        self.assertEqual(args.basin_polishing_activation_ratio, defaults.basin_polishing_activation_ratio)
-        self.assertEqual(args.successful_direction_memory_size, defaults.successful_direction_memory_size)
-        self.assertEqual(args.direction_refinement_enabled, defaults.direction_refinement_enabled)
-        self.assertEqual(args.direction_refinement_max_evaluations, defaults.direction_refinement_max_evaluations)
-        self.assertEqual(args.direction_line_search_mode, defaults.direction_line_search_mode)
-        self.assertEqual(args.direction_line_search_max_steps, defaults.direction_line_search_max_steps)
-        self.assertEqual(args.direction_line_search_min_step_fraction, defaults.direction_line_search_min_step_fraction)
-        self.assertEqual(args.linkage_blocks_enabled, defaults.linkage_blocks_enabled)
-        self.assertEqual(args.linkage_update_interval_batches, defaults.linkage_update_interval_batches)
-        self.assertEqual(args.linkage_neighbor_count, defaults.linkage_neighbor_count)
-        self.assertEqual(args.cross_block_lbfgs_enabled, defaults.cross_block_lbfgs_enabled)
-        self.assertEqual(args.cross_block_lbfgs_memory_size, defaults.cross_block_lbfgs_memory_size)
-        self.assertEqual(args.cooperative_refinement_enabled, defaults.cooperative_refinement_enabled)
-        self.assertEqual(args.cooperative_min_dimension, defaults.cooperative_min_dimension)
-        self.assertEqual(args.cooperative_group_size, defaults.cooperative_group_size)
-        self.assertEqual(args.cooperative_groups_per_batch, defaults.cooperative_groups_per_batch)
-        self.assertEqual(args.cooperative_frontier_enabled, defaults.cooperative_frontier_enabled)
-        self.assertEqual(args.cooperative_frontier_fraction, defaults.cooperative_frontier_fraction)
-        self.assertEqual(args.axis_coverage_pressure, defaults.axis_coverage_pressure)
-        self.assertEqual(args.active_set_max_fraction, defaults.active_set_max_fraction)
-        self.assertEqual(args.active_set_expand_interval_batches, defaults.active_set_expand_interval_batches)
+        self.assertEqual(args.matrix_snapshot_interval, defaults.snapshot_interval)
+        self.assertEqual(args.store_all_snapshots, defaults.store_all_snapshots)
 
-    def test_cli_can_disable_point_cloud_features(self) -> None:
+    def test_cli_can_configure_matrix_controls(self) -> None:
         args = build_parser().parse_args(
             [
-                "point-cloud",
+                "matrix",
                 "--objective",
                 "sphere",
                 "--budget",
                 "100",
-                "--no-trust-regions",
-                "--no-anisotropic-regions",
-                "--no-surrogate",
-                "--no-projection-ensemble",
-                "--no-local-refinement",
-                "--no-coherent-probes",
-                "--no-surrogate-ranking",
-                "--no-surrogate-reliability",
-                "--no-probe-recenter",
-                "--no-basin-polishing",
-                "--no-direction-refinement",
-                "--no-linkage-blocks",
-                "--no-cross-block-lbfgs",
-                "--no-cooperative-refinement",
-                "--no-cooperative-frontier",
-            ]
-        )
-
-        self.assertFalse(args.trust_regions_enabled)
-        self.assertFalse(args.anisotropic_regions_enabled)
-        self.assertFalse(args.surrogate_enabled)
-        self.assertFalse(args.projection_ensemble_enabled)
-        self.assertFalse(args.local_refinement_enabled)
-        self.assertFalse(args.coherent_probes_enabled)
-        self.assertFalse(args.surrogate_ranking_enabled)
-        self.assertFalse(args.surrogate_reliability_enabled)
-        self.assertFalse(args.probe_recenter_enabled)
-        self.assertFalse(args.basin_polishing_enabled)
-        self.assertFalse(args.direction_refinement_enabled)
-        self.assertFalse(args.linkage_blocks_enabled)
-        self.assertFalse(args.cross_block_lbfgs_enabled)
-        self.assertFalse(args.cooperative_refinement_enabled)
-        self.assertFalse(args.cooperative_frontier_enabled)
-
-    def test_removed_evolutionary_engine_flags_are_rejected(self) -> None:
-        parser = build_parser()
-        removed_flags = ["--no-shade", "--no-cma-region", "--no-restart-strategy", "--source-credit-temperature"]
-        for flag in removed_flags:
-            with self.subTest(flag=flag), redirect_stderr(StringIO()):
-                with self.assertRaises(SystemExit):
-                    parser.parse_args(["point-cloud", "--objective", "sphere", "--budget", "100", flag])
-
-    def test_cli_can_configure_point_cloud_controls(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "point-cloud",
-                "--objective",
-                "sphere",
-                "--budget",
-                "100",
-                "--batch-size",
-                "11",
-                "--initial-design-size",
-                "13",
-                "--portfolio-size",
-                "2",
-                "--region-initial-radius-fraction",
-                "0.2",
-                "--early-stop-enabled",
-                "--early-stop-value",
-                "0.001",
-                "--target-value",
-                "0.0001",
-                "--region-stall-patience",
-                "5",
-                "--region-cooldown-batches",
-                "6",
-                "--global-exploration-floor",
-                "0.2",
-                "--region-stencil-fraction",
-                "0.5",
-                "--region-anisotropy-max",
-                "7",
-                "--region-geometry-min-samples",
-                "9",
-                "--active-subspace-size",
-                "5",
-                "--surrogate-full-quadratic-max-dimension",
-                "4",
-                "--projection-axes",
-                "1",
-                "3",
-                "--projection-ensemble-size",
-                "3",
-                "--projection-ensemble-refresh-batches",
-                "5",
-                "--local-refinement-max-evaluations",
-                "21",
-                "--local-refinement-method",
-                "levenberg-marquardt",
-                "--local-refinement-damping",
-                "1e-4",
-                "--candidate-pool-multiplier",
-                "4",
-                "--surrogate-ranking-neighbor-count",
+                "--max-steps",
+                "12",
+                "--matrix-height",
+                "20",
+                "--matrix-width",
                 "24",
-                "--surrogate-rank-weight-min",
-                "0.25",
-                "--surrogate-rank-weight-max",
-                "0.75",
-                "--probe-recenter-max-restarts",
-                "3",
-                "--basin-polishing-min-dimension",
-                "20",
-                "--basin-polishing-activation-ratio",
-                "0.15",
-                "--successful-direction-memory-size",
-                "12",
-                "--direction-refinement-max-evaluations",
-                "64",
-                "--direction-line-search-mode",
-                "opportunistic",
-                "--direction-line-search-max-steps",
-                "5",
-                "--direction-line-search-min-step-fraction",
-                "1e-5",
-                "--linkage-update-interval-batches",
-                "4",
-                "--linkage-neighbor-count",
-                "5",
-                "--cross-block-lbfgs-memory-size",
-                "10",
-                "--cooperative-min-dimension",
-                "200",
-                "--cooperative-group-size",
-                "12",
-                "--cooperative-groups-per-batch",
-                "6",
-                "--cooperative-frontier-fraction",
-                "0.5",
-                "--axis-coverage-pressure",
-                "0.3",
-                "--active-set-max-fraction",
-                "0.4",
-                "--active-set-expand-interval-batches",
-                "7",
-            ]
-        )
-
-        self.assertEqual(args.batch_size, 11)
-        self.assertEqual(args.initial_design_size, 13)
-        self.assertEqual(args.portfolio_size, 2)
-        self.assertAlmostEqual(args.region_initial_radius_fraction, 0.2)
-        self.assertTrue(args.early_stop_enabled)
-        self.assertAlmostEqual(args.early_stop_value, 0.001)
-        self.assertAlmostEqual(args.target_value, 0.0001)
-        self.assertEqual(args.region_stall_patience, 5)
-        self.assertEqual(args.region_cooldown_batches, 6)
-        self.assertAlmostEqual(args.global_exploration_floor, 0.2)
-        self.assertAlmostEqual(args.region_stencil_fraction, 0.5)
-        self.assertAlmostEqual(args.region_anisotropy_max, 7.0)
-        self.assertEqual(args.region_geometry_min_samples, 9)
-        self.assertEqual(args.active_subspace_size, 5)
-        self.assertEqual(args.surrogate_full_quadratic_max_dimension, 4)
-        self.assertEqual(args.projection_axes, [1, 3])
-        self.assertEqual(args.projection_ensemble_size, 3)
-        self.assertEqual(args.projection_ensemble_refresh_batches, 5)
-        self.assertEqual(args.local_refinement_max_evaluations, 21)
-        self.assertEqual(args.local_refinement_method, "levenberg-marquardt")
-        self.assertAlmostEqual(args.local_refinement_damping, 1e-4)
-        self.assertEqual(args.candidate_pool_multiplier, 4)
-        self.assertEqual(args.surrogate_ranking_neighbor_count, 24)
-        self.assertAlmostEqual(args.surrogate_rank_weight_min, 0.25)
-        self.assertAlmostEqual(args.surrogate_rank_weight_max, 0.75)
-        self.assertEqual(args.probe_recenter_max_restarts, 3)
-        self.assertEqual(args.basin_polishing_min_dimension, 20)
-        self.assertAlmostEqual(args.basin_polishing_activation_ratio, 0.15)
-        self.assertEqual(args.successful_direction_memory_size, 12)
-        self.assertEqual(args.direction_refinement_max_evaluations, 64)
-        self.assertEqual(args.direction_line_search_mode, "opportunistic")
-        self.assertEqual(args.direction_line_search_max_steps, 5)
-        self.assertAlmostEqual(args.direction_line_search_min_step_fraction, 1e-5)
-        self.assertEqual(args.linkage_update_interval_batches, 4)
-        self.assertEqual(args.linkage_neighbor_count, 5)
-        self.assertEqual(args.cross_block_lbfgs_memory_size, 10)
-        self.assertEqual(args.cooperative_min_dimension, 200)
-        self.assertEqual(args.cooperative_group_size, 12)
-        self.assertEqual(args.cooperative_groups_per_batch, 6)
-        self.assertAlmostEqual(args.cooperative_frontier_fraction, 0.5)
-        self.assertAlmostEqual(args.axis_coverage_pressure, 0.3)
-        self.assertAlmostEqual(args.active_set_max_fraction, 0.4)
-        self.assertEqual(args.active_set_expand_interval_batches, 7)
-
-    def test_cli_builds_lean_high_dimensional_point_cloud_config(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "point-cloud",
-                "--objective",
-                "sphere",
-                "--dimension",
-                "30",
-                "--budget",
-                "100",
-                "--candidate-pool-multiplier",
-                "5",
-                "--surrogate-ranking-neighbor-count",
-                "20",
-                "--projection-ensemble-size",
-                "3",
-                "--surrogate-rank-weight-min",
+                "--decoder",
+                "random_projection",
+                "--decoder-gain",
+                "1.5",
+                "--projection-seed-offset",
+                "17",
+                "--cell-alive-threshold",
                 "0.2",
-                "--surrogate-rank-weight-max",
-                "0.7",
-                "--probe-recenter-max-restarts",
+                "--local-decoder-block-size",
                 "6",
-                "--basin-polishing-activation-ratio",
-                "0.2",
-                "--successful-direction-memory-size",
-                "18",
-                "--direction-refinement-max-evaluations",
-                "48",
-                "--direction-line-search-max-steps",
-                "6",
-                "--linkage-neighbor-count",
-                "4",
-                "--cross-block-lbfgs-memory-size",
-                "11",
-                "--cooperative-min-dimension",
-                "120",
-                "--cooperative-group-size",
-                "10",
-                "--cooperative-groups-per-batch",
-                "5",
-                "--cooperative-frontier-fraction",
-                "0.45",
-                "--axis-coverage-pressure",
-                "0.25",
-                "--active-set-max-fraction",
-                "0.3",
-                "--active-set-expand-interval-batches",
-                "6",
-            ]
-        )
-
-        _bounds, _smoothlife, point_cloud = _build_configs(args)
-
-        self.assertTrue(point_cloud.coherent_probes_enabled)
-        self.assertTrue(point_cloud.surrogate_ranking_enabled)
-        self.assertEqual(point_cloud.candidate_pool_multiplier, 5)
-        self.assertEqual(point_cloud.surrogate_ranking_neighbor_count, 20)
-        self.assertTrue(point_cloud.projection_ensemble_enabled)
-        self.assertEqual(point_cloud.projection_ensemble_size, 3)
-        self.assertTrue(point_cloud.surrogate_reliability_enabled)
-        self.assertAlmostEqual(point_cloud.surrogate_rank_weight_min, 0.2)
-        self.assertAlmostEqual(point_cloud.surrogate_rank_weight_max, 0.7)
-        self.assertTrue(point_cloud.probe_recenter_enabled)
-        self.assertEqual(point_cloud.probe_recenter_max_restarts, 6)
-        self.assertTrue(point_cloud.basin_polishing_enabled)
-        self.assertAlmostEqual(point_cloud.basin_polishing_activation_ratio, 0.2)
-        self.assertEqual(point_cloud.successful_direction_memory_size, 18)
-        self.assertTrue(point_cloud.direction_refinement_enabled)
-        self.assertEqual(point_cloud.direction_refinement_max_evaluations, 48)
-        self.assertEqual(point_cloud.direction_line_search_mode, "bracketed")
-        self.assertEqual(point_cloud.direction_line_search_max_steps, 6)
-        self.assertTrue(point_cloud.linkage_blocks_enabled)
-        self.assertEqual(point_cloud.linkage_neighbor_count, 4)
-        self.assertTrue(point_cloud.cross_block_lbfgs_enabled)
-        self.assertEqual(point_cloud.cross_block_lbfgs_memory_size, 11)
-        self.assertTrue(point_cloud.cooperative_refinement_enabled)
-        self.assertEqual(point_cloud.cooperative_min_dimension, 120)
-        self.assertEqual(point_cloud.cooperative_group_size, 10)
-        self.assertEqual(point_cloud.cooperative_groups_per_batch, 5)
-        self.assertTrue(point_cloud.cooperative_frontier_enabled)
-        self.assertAlmostEqual(point_cloud.cooperative_frontier_fraction, 0.45)
-        self.assertAlmostEqual(point_cloud.axis_coverage_pressure, 0.25)
-        self.assertAlmostEqual(point_cloud.active_set_max_fraction, 0.3)
-        self.assertEqual(point_cloud.active_set_expand_interval_batches, 6)
-
-    def test_target_value_enables_early_stop_in_point_cloud_config(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "point-cloud",
-                "--objective",
-                "sphere",
-                "--budget",
-                "100",
-                "--target-value",
-                "1e-9",
-            ]
-        )
-
-        _bounds, _smoothlife, point_cloud = _build_configs(args)
-
-        self.assertTrue(point_cloud.early_stop_enabled)
-        self.assertAlmostEqual(point_cloud.early_stop_value, 1e-9)
-
-    def test_point_cloud_accepts_nd_dimension_and_projection_axes(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "point-cloud",
-                "--objective",
-                "sphere",
-                "--dimension",
-                "5",
-                "--budget",
-                "100",
-                "--projection-axes",
+                "--local-decoder-overlap",
                 "1",
-                "4",
+                "--no-local-credit",
+                "--local-credit-strength",
+                "0.45",
+                "--local-credit-learning-rate",
+                "0.25",
+                "--local-credit-decay",
+                "0.85",
+                "--local-credit-clip",
+                "3.5",
+                "--no-patch-probes",
+                "--patch-probe-interval-evaluations",
+                "13",
+                "--patch-probe-count",
+                "2",
+                "--patch-probe-step",
+                "0.11",
+                "--steps-per-evaluation",
+                "3",
+                "--elite-pull-strength",
+                "0.2",
+                "--failure-damping",
+                "0.1",
+                "--reward-decay",
+                "0.9",
+                "--reward-boost",
+                "0.5",
+                "--mutation-noise",
+                "0.02",
+                "--mutation-decay",
+                "0.99",
+                "--advantage-strength",
+                "0.3",
+                "--advantage-decay",
+                "0.8",
+                "--direction-strength",
+                "0.4",
+                "--direction-decay",
+                "0.7",
+                "--temperature-init",
+                "1.2",
+                "--temperature-decay",
+                "0.98",
+                "--temperature-reheat",
+                "0.15",
+                "--stagnation-reheat-evaluations",
+                "9",
+                "--no-matrix-line-search",
+                "--matrix-line-search-alphas",
+                "0.25",
+                "0.75",
+                "1.25",
+                "--target-value",
+                "1e-5",
+                "--matrix-snapshot-interval",
+                "5",
+                "--no-store-all-snapshots",
             ]
         )
 
-        bounds, _smoothlife, point_cloud = _build_configs(args)
+        _bounds, _smoothlife, matrix = _build_configs(args)
+        self.assertEqual(matrix.max_evaluations, 100)
+        self.assertEqual(matrix.max_steps, 12)
+        self.assertEqual(matrix.matrix_shape, (20, 24))
+        self.assertEqual(matrix.decoder, "random_projection")
+        self.assertAlmostEqual(matrix.decoder_gain, 1.5)
+        self.assertEqual(matrix.projection_seed_offset, 17)
+        self.assertAlmostEqual(matrix.cell_alive_threshold, 0.2)
+        self.assertEqual(matrix.local_decoder_block_size, 6)
+        self.assertEqual(matrix.local_decoder_overlap, 1)
+        self.assertFalse(matrix.local_credit_enabled)
+        self.assertAlmostEqual(matrix.local_credit_strength, 0.45)
+        self.assertAlmostEqual(matrix.local_credit_learning_rate, 0.25)
+        self.assertAlmostEqual(matrix.local_credit_decay, 0.85)
+        self.assertAlmostEqual(matrix.local_credit_clip, 3.5)
+        self.assertFalse(matrix.patch_probe_enabled)
+        self.assertEqual(matrix.patch_probe_interval_evaluations, 13)
+        self.assertEqual(matrix.patch_probe_count, 2)
+        self.assertAlmostEqual(matrix.patch_probe_step, 0.11)
+        self.assertEqual(matrix.steps_per_evaluation, 3)
+        self.assertAlmostEqual(matrix.elite_pull_strength, 0.2)
+        self.assertAlmostEqual(matrix.failure_damping, 0.1)
+        self.assertAlmostEqual(matrix.reward_decay, 0.9)
+        self.assertAlmostEqual(matrix.reward_boost, 0.5)
+        self.assertAlmostEqual(matrix.mutation_noise, 0.02)
+        self.assertAlmostEqual(matrix.mutation_decay, 0.99)
+        self.assertAlmostEqual(matrix.advantage_strength, 0.3)
+        self.assertAlmostEqual(matrix.advantage_decay, 0.8)
+        self.assertAlmostEqual(matrix.direction_strength, 0.4)
+        self.assertAlmostEqual(matrix.direction_decay, 0.7)
+        self.assertAlmostEqual(matrix.temperature_init, 1.2)
+        self.assertAlmostEqual(matrix.temperature_decay, 0.98)
+        self.assertAlmostEqual(matrix.temperature_reheat, 0.15)
+        self.assertEqual(matrix.stagnation_reheat_evaluations, 9)
+        self.assertFalse(matrix.matrix_line_search_enabled)
+        self.assertEqual(matrix.matrix_line_search_alphas, (0.25, 0.75, 1.25))
+        self.assertTrue(matrix.early_stop_enabled)
+        self.assertAlmostEqual(matrix.early_stop_value or 0.0, 1e-5)
+        self.assertEqual(matrix.snapshot_interval, 5)
+        self.assertFalse(matrix.store_all_snapshots)
 
+    def test_matrix_accepts_nd_and_point_cloud_command_is_removed(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["matrix", "--objective", "sphere", "--dimension", "5", "--budget", "12"])
+        bounds, _smoothlife, _matrix = _build_configs(args)
         self.assertEqual(len(bounds), 5)
-        self.assertEqual(point_cloud.projection_axes, (1, 4))
 
-    def test_simulate_and_himmelblau_reject_nd_dimension(self) -> None:
-        simulate_args = build_parser().parse_args(
-            ["simulate", "--objective", "sphere", "--dimension", "5", "--steps", "1"]
-        )
-        with self.assertRaisesRegex(ValueError, "simulate"):
+        with redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["point-cloud", "--objective", "sphere", "--budget", "12"])
+
+    def test_simulate_and_himmelblau_reject_invalid_dimensions(self) -> None:
+        simulate_args = build_parser().parse_args(["simulate", "--objective", "sphere", "--dimension", "5"])
+        with self.assertRaisesRegex(ValueError, "simulate currently supports only --dimension 2"):
             _build_configs(simulate_args)
 
-        himmelblau_args = build_parser().parse_args(
-            ["point-cloud", "--objective", "himmelblau", "--dimension", "5", "--budget", "100"]
+        matrix_args = build_parser().parse_args(
+            ["matrix", "--objective", "himmelblau", "--dimension", "5", "--budget", "20"]
         )
-        with self.assertRaisesRegex(ValueError, "himmelblau"):
-            _build_configs(himmelblau_args)
+        with self.assertRaisesRegex(ValueError, "himmelblau requires --dimension 2"):
+            _build_configs(matrix_args)
 
-    def test_point_cloud_nd_rejects_visualization_outputs(self) -> None:
+    def test_matrix_command_runs_small_nd_case(self) -> None:
         args = build_parser().parse_args(
             [
-                "point-cloud",
+                "matrix",
                 "--objective",
                 "sphere",
                 "--dimension",
                 "5",
                 "--budget",
-                "100",
-                "--gif",
-                "nd.gif",
+                "8",
+                "--seed",
+                "3",
+                "--no-store-all-snapshots",
             ]
         )
+        payload = run_matrix_command(args)
 
-        with self.assertRaisesRegex(ValueError, "visualization"):
-            run_point_cloud_command(args)
-
-    def test_agsls_command_is_removed(self) -> None:
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            build_parser().parse_args(["agsls", "--objective", "sphere", "--budget", "100"])
+        self.assertEqual(payload["mode"], "matrix")
+        self.assertEqual(payload["dimension"], 5)
+        self.assertLessEqual(payload["evaluations"], 8)
+        self.assertEqual(payload["matrix_shape"], [16, 16])
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "smooth-life-search"
 version = "0.1.0"
-description = "2D SmoothLife Search and Adaptive Grid Smooth Life Search with animation export."
+description = "2D SmoothLife simulation and Matrix SmoothLife optimization with animation export."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "CC0-1.0"}

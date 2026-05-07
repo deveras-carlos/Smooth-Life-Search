@@ -93,6 +93,12 @@ def refresh_dynamics_fields(
     config: SmoothLifeConfig,
     inner_kernel: np.ndarray,
     outer_kernel: np.ndarray,
+    advantage_field: np.ndarray | None = None,
+    direction_field: np.ndarray | None = None,
+    local_credit_field: np.ndarray | None = None,
+    advantage_strength: float = 0.0,
+    direction_strength: float = 0.0,
+    local_credit_strength: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Recompute inner fill, outer fill, and transition target."""
 
@@ -105,6 +111,12 @@ def refresh_dynamics_fields(
         outer_fill,
         config,
         objective_field,
+        advantage_field,
+        direction_field,
+        local_credit_field,
+        advantage_strength,
+        direction_strength,
+        local_credit_strength,
     )
     return np.clip(inner_fill, 0.0, 1.0), np.clip(outer_fill, 0.0, 1.0), transition
 

@@ -5,7 +5,7 @@ import warnings
 
 import numpy as np
 
-from smooth_life_search import PointCloudSnapshot, RenderOptions
+from smooth_life_search import MatrixSmoothLifeSnapshot, RenderOptions
 from smooth_life_search.core import SearchRun, SmoothLifeSnapshot
 from smooth_life_search.visualization import render_run_frames, snapshot_to_image
 
@@ -80,27 +80,28 @@ class TestVisualizationRendering(unittest.TestCase):
 
         self.assertEqual(frame.size, (116, 208))
 
-    def test_point_cloud_snapshot_render_is_nonblank(self) -> None:
+    def test_matrix_snapshot_render_is_nonblank(self) -> None:
         shape = (16, 16)
-        bounds = np.asarray([[-1.0, 1.0], [-1.0, 1.0]], dtype=float)
-        density = np.zeros(shape, dtype=float)
-        density[7:9, 7:9] = 1.0
-        snapshot = PointCloudSnapshot(
+        bounds = np.asarray([[0.0, 16.0], [0.0, 16.0]], dtype=float)
+        reward = np.zeros(shape, dtype=float)
+        reward[7:9, 7:9] = 1.0
+        field = np.linspace(-0.5, 0.5, shape[0] * shape[1], dtype=float).reshape(shape)
+        snapshot = MatrixSmoothLifeSnapshot(
             step_index=2,
             bounds=bounds,
-            density_field=density,
-            objective_field=density.copy(),
-            evaluated_mask=density > 0.0,
-            best_point=np.asarray([0.0, 0.0], dtype=float),
+            field=field,
+            inner_fill=np.zeros(shape, dtype=float),
+            outer_fill=np.ones(shape, dtype=float) * 0.25,
+            objective_field=reward.copy(),
+            transition_field=-field,
+            evaluated_mask=np.ones(shape, dtype=bool),
+            best_point=np.asarray([0.0, 0.0, 0.0], dtype=float),
             best_value=0.0,
-            local_best_point=np.asarray([0.0, 0.0], dtype=float),
+            local_best_point=np.asarray([0.0, 0.0, 0.0], dtype=float),
             local_best_value=0.0,
-            box_best_point=np.asarray([0.0, 0.0], dtype=float),
+            box_best_point=np.asarray([0.0, 0.0, 0.0], dtype=float),
             box_best_value=0.0,
-            archive_points=np.asarray([[0.0, 0.0], [0.25, -0.25]], dtype=float),
-            archive_values=np.asarray([0.0, 0.2], dtype=float),
-            region_bounds=[np.asarray([[-0.5, 0.5], [-0.5, 0.5]], dtype=float)],
-            metadata={"mode": "point-cloud", "evaluations": 2, "explored_fraction": 0.1},
+            metadata={"mode": "matrix", "evaluations": 2, "matrix_shape": [16, 16]},
         )
 
         image = snapshot_to_image(snapshot, scale=1)

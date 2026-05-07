@@ -1,4 +1,4 @@
-"""Tk viewer for SmoothLife and point-cloud animations."""
+"""Tk viewer for SmoothLife and matrix animations."""
 
 from __future__ import annotations
 
