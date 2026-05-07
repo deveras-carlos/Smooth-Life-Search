@@ -3,80 +3,22 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Callable
 
 import numpy as np
 
 from ..core import SearchRun, normalize_bounds_nd
 from ..smoothlife.config import SmoothLifeConfig
+from .allocation import StageAllocationState, lean_stage_weights
 from .archive import PointCloudArchive
 from .config import PointCloudSearchConfig
 from .geometry import RegionGeometry, fit_region_geometry
 from .models import PointCloudBatchEvent, PointCloudRegion, PointCloudRegionEvent, PointCloudSnapshot
+from .proposals import CandidateProposal, GradientResult, SourceStats
 from .surrogate import QuadraticSurrogate, fit_quadratic_surrogate
 
 Objective = Callable[[np.ndarray], float]
-
-
-@dataclass(slots=True)
-class SourceStats:
-    """Adaptive credit record for one generated candidate source family."""
-
-    attempts: int = 0
-    evaluations: int = 0
-    improvements: int = 0
-    improvement_sum: float = 0.0
-    ema_credit: float = 0.0
-    last_improvement_batch: int = 0
-
-
-@dataclass(slots=True)
-class CMARegionState:
-    """Lightweight region-local covariance adaptation state."""
-
-    sigma: float
-    diagonal_variance: np.ndarray
-    evolution_path: np.ndarray
-    directions: list[np.ndarray]
-    success_rate_ema: float = 0.0
-
-
-@dataclass(slots=True)
-class CandidateProposal:
-    """One generated proposal with optimizer metadata."""
-
-    point: np.ndarray
-    source: str
-    family: str
-    parent_key: tuple[str, ...] | None = None
-    region_id: int | None = None
-    axes: tuple[int, ...] | None = None
-    shade_params: tuple[float, float] | None = None
-    predicted_score: float | None = None
-
-    def __iter__(self):
-        yield self.point
-        yield self.source
-
-    def __getitem__(self, index: int):
-        if index == 0:
-            return self.point
-        if index == 1:
-            return self.source
-        raise IndexError(index)
-
-
-@dataclass(slots=True)
-class GradientResult:
-    """Finite-difference gradient plus recentering diagnostics."""
-
-    gradient: np.ndarray | None
-    spent: int
-    recentered: bool
-    point: np.ndarray
-    value: float
-    improvement_count: int = 0
 
 
 class PointCloudSmoothLifeSearch:
@@ -111,6 +53,10 @@ class PointCloudSmoothLifeSearch:
         self._last_density = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_objective_field = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_evaluated_mask = np.zeros(self.config.density_grid_shape, dtype=bool)
+        self._last_density_frames: list[tuple[tuple[str, tuple[int, int], np.ndarray, np.ndarray], np.ndarray]] = []
+        self._last_projection_frame_count = 0
+        self._last_surrogate_reliability = 1.0
+        self._last_surrogate_rank_weight = 1.0
         self._local_refinement_stalled = False
         self._stop_reason = "not_started"
         self._global_sequence_index = 0
@@ -120,14 +66,7 @@ class PointCloudSmoothLifeSearch:
         self._block_cursor = 0
         self._block_hessian_inverse: dict[tuple[int, ...], np.ndarray] = {}
         self._source_stats: dict[str, SourceStats] = {}
-        self._shade_f_memory = np.full(int(self.config.shade_memory_size), 0.5, dtype=float)
-        self._shade_cr_memory = np.full(int(self.config.shade_memory_size), 0.9, dtype=float)
-        self._shade_memory_index = 0
-        self._cma_states: dict[int, CMARegionState] = {}
-        self._restart_lattice_index = 0
-        self._restart_axis_shift = np.zeros(self.dimension, dtype=float)
         self._last_improvement_batch = 0
-        self._live_population_keys: list[tuple[str, ...]] = []
         self._anchor_baseline_target: float | None = None
         self._successful_directions: list[np.ndarray] = []
         self._linkage_scores = np.zeros((self.dimension, self.dimension), dtype=float)
@@ -135,6 +74,7 @@ class PointCloudSmoothLifeSearch:
         self._lbfgs_pairs: list[tuple[np.ndarray, np.ndarray]] = []
         self._probe_recenters_total = 0
         self._axis_coverage = np.zeros(self.dimension, dtype=float)
+        self._last_cooperative_improved_axes: tuple[int, ...] = ()
         self._cooperative_group_cursor = 0
         self._active_set_expansions = 0
         self._active_set_last_expand_batch = -1
@@ -167,14 +107,7 @@ class PointCloudSmoothLifeSearch:
         self._block_cursor = 0
         self._block_hessian_inverse = {}
         self._source_stats = {}
-        self._shade_f_memory = np.full(int(self.config.shade_memory_size), 0.5, dtype=float)
-        self._shade_cr_memory = np.full(int(self.config.shade_memory_size), 0.9, dtype=float)
-        self._shade_memory_index = 0
-        self._cma_states = {}
-        self._restart_lattice_index = 0
-        self._restart_axis_shift = self.rng.random(self.dimension)
         self._last_improvement_batch = 0
-        self._live_population_keys = []
         self._anchor_baseline_target = None
         self._successful_directions = []
         self._linkage_scores = np.zeros((self.dimension, self.dimension), dtype=float)
@@ -182,12 +115,17 @@ class PointCloudSmoothLifeSearch:
         self._lbfgs_pairs = []
         self._probe_recenters_total = 0
         self._axis_coverage = np.zeros(self.dimension, dtype=float)
+        self._last_cooperative_improved_axes = ()
         self._cooperative_group_cursor = 0
         self._active_set_expansions = 0
         self._active_set_last_expand_batch = -1
         self._last_density = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_objective_field = np.zeros(self.config.density_grid_shape, dtype=float)
         self._last_evaluated_mask = np.zeros(self.config.density_grid_shape, dtype=bool)
+        self._last_density_frames = []
+        self._last_projection_frame_count = 0
+        self._last_surrogate_reliability = 1.0
+        self._last_surrogate_rank_weight = 1.0
 
     def _evaluation_limit(self) -> int:
         limit = self._active_max_evaluations if self._active_max_evaluations is not None else self.config.max_evaluations
@@ -222,7 +160,6 @@ class PointCloudSmoothLifeSearch:
             self.config.high_dimensional_refinement_enabled
             and self.config.local_refinement_enabled
             and self.dimension >= int(self.config.high_dimensional_min_dimension)
-            and (self.dimension >= 30 or self._basin_polishing_active())
         )
 
     def _dimension_scaled_batches_active(self) -> bool:
@@ -233,6 +170,8 @@ class PointCloudSmoothLifeSearch:
 
     def _effective_batch_size(self) -> int:
         base = int(self.config.batch_size)
+        if not self.config.local_refinement_enabled and self.config.direction_refinement_enabled:
+            return max(base, min(int(self.config.dimension_scaled_batch_max), 48))
         if not self._dimension_scaled_batches_active():
             return base
         return min(int(self.config.dimension_scaled_batch_max), max(base, 2 * self.dimension))
@@ -248,16 +187,33 @@ class PointCloudSmoothLifeSearch:
             and np.isfinite(self.best_value)
         )
 
+    def _cooperative_heavy_allocation_active(self) -> bool:
+        return bool(
+            self._cooperative_refinement_active()
+            and not (
+                self.config.local_refinement_enabled
+                and self._basin_polishing_active()
+                and 100 <= self.dimension < 200
+            )
+        )
+
+    def _cooperative_refinement_due(self) -> bool:
+        if not self._cooperative_refinement_active():
+            return False
+        if not self._cooperative_heavy_allocation_active():
+            return False
+        if self._deep_basin_polishing_active():
+            return self._batch_index % 2 == 0
+        if self.dimension >= 200 or not self._basin_polishing_active():
+            return True
+        return self._batch_index % 4 == 0
+
     @staticmethod
     def _source_family(source: str) -> str:
         if source.startswith("cooperative:"):
             return "cooperative"
-        if source.startswith("region:") and ":cma" in source:
-            return "cma"
         if source.startswith("region:"):
             return "region"
-        if source.startswith("restart:"):
-            return "restart"
         if source in {"density", "smoothlife_density"}:
             return "smoothlife_density"
         if source.startswith("exploit"):
@@ -272,7 +228,6 @@ class PointCloudSmoothLifeSearch:
         parent_key: tuple[str, ...] | None = None,
         region_id: int | None = None,
         axes: tuple[int, ...] | None = None,
-        shade_params: tuple[float, float] | None = None,
         predicted_score: float | None = None,
     ) -> CandidateProposal:
         return CandidateProposal(
@@ -282,7 +237,6 @@ class PointCloudSmoothLifeSearch:
             parent_key=parent_key,
             region_id=region_id,
             axes=None if axes is None else tuple(int(axis) for axis in axes),
-            shade_params=shade_params,
             predicted_score=predicted_score,
         )
 
@@ -312,18 +266,22 @@ class PointCloudSmoothLifeSearch:
         self,
         attempts: Counter[str],
         evaluations: Counter[str],
-        improvements: Counter[str],
-        improvement_amounts: Counter[str],
+        incumbent_improvements: Counter[str],
+        incumbent_amounts: Counter[str],
     ) -> None:
         families = {
             self._source_family(source)
-            for source in set(attempts) | set(evaluations) | set(improvements) | set(improvement_amounts)
+            for source in (set(attempts) | set(evaluations) | set(incumbent_improvements) | set(incumbent_amounts))
         }
         for family in families:
             attempted = sum(count for source, count in attempts.items() if self._source_family(source) == family)
             evaluated = sum(count for source, count in evaluations.items() if self._source_family(source) == family)
-            improved = sum(count for source, count in improvements.items() if self._source_family(source) == family)
-            amount = sum(value for source, value in improvement_amounts.items() if self._source_family(source) == family)
+            improved = sum(
+                count for source, count in incumbent_improvements.items() if self._source_family(source) == family
+            )
+            amount = sum(
+                value for source, value in incumbent_amounts.items() if self._source_family(source) == family
+            )
             stats = self._source_stat(family)
             stats.attempts += int(attempted)
             stats.evaluations += int(evaluated)
@@ -331,17 +289,17 @@ class PointCloudSmoothLifeSearch:
             stats.improvement_sum += float(amount)
             if improved > 0:
                 stats.last_improvement_batch = int(self._batch_index)
-            batch_credit = float(np.log1p(max(float(amount), 0.0))) / max(int(evaluated), 1)
-            stats.ema_credit = 0.85 * float(stats.ema_credit) + 0.15 * batch_credit
 
     def _source_stats_payload(self) -> dict[str, dict[str, float | int]]:
+        total_evaluations = max(sum(int(stats.evaluations) for stats in self._source_stats.values()), 1)
         return {
             source: {
                 "attempts": int(stats.attempts),
                 "evaluations": int(stats.evaluations),
                 "improvements": int(stats.improvements),
                 "improvement_sum": float(stats.improvement_sum),
-                "ema_credit": float(stats.ema_credit),
+                "improvement_rate": float(stats.improvements) / max(int(stats.evaluations), 1),
+                "evaluation_share": float(stats.evaluations) / total_evaluations,
                 "last_improvement_batch": int(stats.last_improvement_batch),
             }
             for source, stats in sorted(self._source_stats.items())
@@ -385,6 +343,19 @@ class PointCloudSmoothLifeSearch:
         if float(baseline) > 0.0:
             return current <= float(self.config.basin_polishing_activation_ratio) * float(baseline)
         return current <= float(baseline) - abs(float(baseline)) * float(self.config.basin_polishing_activation_ratio)
+
+    def _basin_progress_ratio(self) -> float | None:
+        baseline = self._anchor_baseline_target
+        if baseline is None or not np.isfinite(baseline) or float(baseline) <= 0.0:
+            return None
+        current = self._target(self.best_value)
+        if not np.isfinite(current):
+            return None
+        return float(current) / float(baseline)
+
+    def _deep_basin_polishing_active(self) -> bool:
+        ratio = self._basin_progress_ratio()
+        return bool(self._basin_polishing_active() and self.dimension >= 200 and ratio is not None and ratio <= 0.08)
 
     def _probe_recenter_improvement_is_meaningful(self, current_value: float, candidate_value: float) -> bool:
         if not self._evolutionary_search_active():
@@ -498,8 +469,9 @@ class PointCloudSmoothLifeSearch:
         if self._linkage_scores.shape == (self.dimension, self.dimension):
             scores += 0.20 * self._unit_scaled(np.sum(np.asarray(self._linkage_scores, dtype=float), axis=1))
         scores += 0.10 * self._unit_scaled(self._elite_axis_variance())
+        coverage_weight = float(self.config.axis_coverage_pressure)
         coverage_pressure = 1.0 / (1.0 + np.asarray(self._axis_coverage, dtype=float))
-        scores += 0.10 * self._unit_scaled(coverage_pressure)
+        scores += coverage_weight * self._unit_scaled(coverage_pressure)
         if not np.any(scores > 0.0):
             scores = coverage_pressure
         return np.where(np.isfinite(scores), scores, 0.0)
@@ -583,6 +555,48 @@ class PointCloudSmoothLifeSearch:
                     break
         return np.asarray(sorted(axes[:group_size]), dtype=int)
 
+    def _cooperative_frontier_seeds(
+        self,
+        count: int,
+        active_axes: np.ndarray,
+        scores: np.ndarray,
+    ) -> list[int]:
+        if not self.config.cooperative_frontier_enabled or count <= 0:
+            return []
+        seeds: list[int] = []
+
+        def add(axis: int) -> None:
+            resolved = int(axis) % self.dimension
+            if resolved not in seeds:
+                seeds.append(resolved)
+
+        recent_axes = list(self._last_cooperative_improved_axes)
+        if not recent_axes and self._successful_directions:
+            direction = np.asarray(self._successful_directions[-1], dtype=float)
+            recent_axes = [int(axis) for axis in np.argsort(np.abs(direction))[::-1][: self._cooperative_group_size()]]
+        if not recent_axes and np.any(self._axis_activity > 0.0):
+            recent_axes = [int(np.argmax(self._axis_activity))]
+        for axis in recent_axes:
+            add(axis + 1)
+            add(axis - 1)
+            if self._linkage_scores.shape == (self.dimension, self.dimension):
+                linkage = np.asarray(self._linkage_scores[int(axis) % self.dimension], dtype=float)
+                linked = int(np.argmax(linkage))
+                if float(linkage[linked]) > 0.0:
+                    add(linked)
+            if len(seeds) >= count:
+                return seeds[:count]
+        coverage_order = [int(axis) for axis in np.argsort(self._axis_coverage) if int(axis) in set(active_axes.tolist())]
+        for axis in coverage_order:
+            add(axis)
+            if len(seeds) >= count:
+                return seeds[:count]
+        for axis in active_axes[np.argsort(scores[active_axes])[::-1]]:
+            add(int(axis))
+            if len(seeds) >= count:
+                break
+        return seeds[:count]
+
     def _cooperative_groups(self, count: int | None = None) -> list[np.ndarray]:
         if not self._cooperative_refinement_active():
             return []
@@ -602,6 +616,16 @@ class PointCloudSmoothLifeSearch:
             groups.append(np.asarray(key, dtype=int))
 
         top_axes = [int(axis) for axis in active_axes[np.argsort(scores[active_axes])[::-1]]]
+        frontier_count = (
+            max(1, int(np.ceil(target_count * float(self.config.cooperative_frontier_fraction))))
+            if self.config.cooperative_frontier_enabled
+            else 0
+        )
+        for axis in self._cooperative_frontier_seeds(frontier_count, active_axes, scores):
+            add_group(self._cooperative_group_from_seed([axis], active_axes, scores))
+            if len(groups) >= target_count:
+                return groups
+
         top_limit = 1
         for axis in top_axes[:top_limit]:
             add_group(self._cooperative_group_from_seed([axis], active_axes, scores))
@@ -674,76 +698,6 @@ class PointCloudSmoothLifeSearch:
             return None
         return direction
 
-    def _population_limit(self) -> int:
-        configured = self.config.evolutionary_population_size
-        if configured is not None:
-            return int(configured)
-        return min(
-            int(self.config.evolutionary_population_max),
-            max(4 * self.dimension, int(self.config.initial_design_size), 64),
-        )
-
-    def _sample_by_key(self, key: tuple[str, ...] | None):
-        if key is None:
-            return None
-        index = self.archive._keys.get(key)
-        if index is None:
-            return None
-        return self.archive.samples[index]
-
-    def _refresh_live_population(self) -> None:
-        if not self._evolutionary_search_active() or len(self.archive) == 0:
-            self._live_population_keys = []
-            return
-        points, values = self.archive.arrays()
-        limit = min(self._population_limit(), len(self.archive))
-        if limit <= 0:
-            self._live_population_keys = []
-            return
-        target = -values if self.smoothlife_config.maximize else values
-        order = np.argsort(target)
-        elite_count = min(limit, max(1, min(limit // 2, 64)))
-        chosen: list[int] = [int(index) for index in order[:elite_count]]
-        if len(chosen) < limit:
-            normalized = (points - self.original_bounds[:, 0]) / (self.original_bounds[:, 1] - self.original_bounds[:, 0])
-            chosen_set = set(chosen)
-            remaining = np.asarray([int(index) for index in order if int(index) not in chosen_set], dtype=int)
-            if remaining.size > 0:
-                selected = normalized[chosen]
-                remaining_points = normalized[remaining]
-                distances = np.min(
-                    np.linalg.norm(remaining_points[:, None, :] - selected[None, :, :], axis=2),
-                    axis=1,
-                )
-                diverse_order = remaining[np.argsort(distances)[::-1]]
-                chosen.extend(int(index) for index in diverse_order[: limit - len(chosen)])
-        self._live_population_keys = [PointCloudArchive.key(points[index]) for index in chosen[:limit]]
-
-    def _live_population_arrays(self) -> tuple[np.ndarray, np.ndarray, list[tuple[str, ...]]]:
-        if not self._live_population_keys:
-            self._refresh_live_population()
-        samples = [self._sample_by_key(key) for key in self._live_population_keys]
-        live_samples = [sample for sample in samples if sample is not None]
-        if not live_samples:
-            return np.empty((0, self.dimension), dtype=float), np.empty((0,), dtype=float), []
-        return (
-            np.vstack([sample.point for sample in live_samples]).astype(float, copy=False),
-            np.asarray([sample.value for sample in live_samples], dtype=float),
-            [PointCloudArchive.key(sample.point) for sample in live_samples],
-        )
-
-    def _cma_states_payload(self) -> dict[str, dict[str, object]]:
-        return {
-            str(region_id): {
-                "sigma": float(state.sigma),
-                "success_rate_ema": float(state.success_rate_ema),
-                "direction_count": int(len(state.directions)),
-                "diagonal_variance_mean": float(np.mean(state.diagonal_variance)),
-                "diagonal_variance_max": float(np.max(state.diagonal_variance)),
-            }
-            for region_id, state in sorted(self._cma_states.items())
-        }
-
     def _projection_axes(self) -> tuple[int, int]:
         if self.config.projection_axes is None:
             return 0, 1
@@ -758,16 +712,22 @@ class PointCloudSmoothLifeSearch:
         basis[axes[1], 1] = 1.0
         return basis
 
+    @staticmethod
+    def _frame_key(frame: tuple[str, tuple[int, int], np.ndarray, np.ndarray]) -> tuple[object, ...]:
+        kind, axes, _origin, basis = frame
+        if kind == "coordinate":
+            return kind, tuple(int(axis) for axis in axes)
+        dominant = tuple(int(axis) for axis in np.argmax(np.abs(np.asarray(basis, dtype=float)), axis=0))
+        signs = tuple(int(np.sign(np.asarray(basis, dtype=float)[axis, column])) for column, axis in enumerate(dominant))
+        return kind, dominant, signs
+
     def _density_projection_frame(self) -> tuple[str, tuple[int, int], np.ndarray, np.ndarray]:
-        axes = self._projection_axes()
-        coordinate_frame = (
-            "coordinate",
-            axes,
-            np.zeros(self.dimension, dtype=float),
-            self._coordinate_projection_basis(axes),
-        )
-        if self.config.projection_axes is not None or self.dimension == 2:
-            return coordinate_frame
+        return self._density_projection_frames()[0]
+
+    def _active_subspace_density_frame(
+        self,
+        axes: tuple[int, int],
+    ) -> tuple[str, tuple[int, int], np.ndarray, np.ndarray] | None:
         candidates = [
             region
             for region in self._active_regions()
@@ -776,7 +736,7 @@ class PointCloudSmoothLifeSearch:
             and np.asarray(region.geometry_basis, dtype=float).shape[1] >= 2
         ]
         if not candidates:
-            return coordinate_frame
+            return None
         widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
         best_normalized = self._normalized_point(self.best_point)
         region = min(
@@ -791,6 +751,91 @@ class PointCloudSmoothLifeSearch:
             self._normalized_point(region.center),
             np.asarray(region.geometry_basis, dtype=float)[:, :2],
         )
+
+    def _density_projection_frames(self) -> list[tuple[str, tuple[int, int], np.ndarray, np.ndarray]]:
+        axes = self._projection_axes()
+        coordinate_frame = (
+            "coordinate",
+            axes,
+            np.zeros(self.dimension, dtype=float),
+            self._coordinate_projection_basis(axes),
+        )
+        if (
+            not self.config.projection_ensemble_enabled
+            or self.dimension == 2
+            or int(self.config.projection_ensemble_size) <= 1
+        ):
+            return [coordinate_frame]
+        frames: list[tuple[str, tuple[int, int], np.ndarray, np.ndarray]] = []
+        seen: set[tuple[object, ...]] = set()
+
+        def add(frame: tuple[str, tuple[int, int], np.ndarray, np.ndarray]) -> None:
+            if len(frames) >= int(self.config.projection_ensemble_size):
+                return
+            basis = np.asarray(frame[3], dtype=float)
+            if basis.shape != (self.dimension, 2) or not np.all(np.isfinite(basis)):
+                return
+            key = self._frame_key(frame)
+            if key in seen:
+                return
+            seen.add(key)
+            frames.append((frame[0], frame[1], np.asarray(frame[2], dtype=float).copy(), basis.copy()))
+
+        if self.config.projection_axes is not None:
+            add(coordinate_frame)
+        else:
+            active_frame = self._active_subspace_density_frame(axes)
+            active_first_dimension = max(16, int(self.config.active_subspace_size) * 2)
+            if active_frame is not None and self.dimension <= active_first_dimension:
+                add(active_frame)
+                add(coordinate_frame)
+            else:
+                add(coordinate_frame)
+                if active_frame is not None:
+                    add(active_frame)
+        if self._successful_directions:
+            directions = np.asarray(self._successful_directions[-int(self.config.successful_direction_memory_size) :], dtype=float)
+            activity = np.mean(np.abs(directions), axis=0)
+            ranked = [int(axis) for axis in np.argsort(activity)[::-1] if int(axis) < self.dimension]
+            if len(ranked) >= 2 and float(activity[ranked[1]]) > 0.0:
+                success_axes = (ranked[0], ranked[1])
+                add(
+                    (
+                        "successful_axes",
+                        success_axes,
+                        np.zeros(self.dimension, dtype=float),
+                        self._coordinate_projection_basis(success_axes),
+                    )
+                )
+        coverage_order = [int(axis) for axis in np.argsort(self._axis_coverage) if int(axis) < self.dimension]
+        if len(coverage_order) >= 2:
+            coverage_axes = (coverage_order[0], coverage_order[1])
+            add(
+                (
+                    "coverage_axes",
+                    coverage_axes,
+                    np.zeros(self.dimension, dtype=float),
+                    self._coordinate_projection_basis(coverage_axes),
+                )
+            )
+        if len(frames) < int(self.config.projection_ensemble_size) and np.any(self._axis_activity > 0.0):
+            activity_order = [int(axis) for axis in np.argsort(self._axis_activity)[::-1] if int(axis) < self.dimension]
+            for first in activity_order:
+                for second in coverage_order:
+                    if first == second:
+                        continue
+                    add(
+                        (
+                            "activity_coverage_axes",
+                            (first, second),
+                            np.zeros(self.dimension, dtype=float),
+                            self._coordinate_projection_basis((first, second)),
+                        )
+                    )
+                    break
+                if len(frames) >= int(self.config.projection_ensemble_size):
+                    break
+        return frames or [coordinate_frame]
 
     @staticmethod
     def _project_normalized_points(
@@ -857,10 +902,6 @@ class PointCloudSmoothLifeSearch:
         source_counts: Counter[str] = Counter()
         source_improvements: Counter[str] = Counter()
         source_improvement_amounts: Counter[str] = Counter()
-        source_relative_successes: Counter[str] = Counter()
-        source_relative_amounts: Counter[str] = Counter()
-        shade_successes: list[tuple[float, float, float]] = []
-        cma_successes: list[tuple[int, np.ndarray, float]] = []
         improvements = 0
         region_improvements: Counter[int] = Counter()
         region_attempts: Counter[int] = Counter()
@@ -869,10 +910,7 @@ class PointCloudSmoothLifeSearch:
                 break
             point = proposal.point
             source = proposal.source
-            clipped = self._clip_point(point)
             incumbent_before = float(self.best_value)
-            parent_sample = self._sample_by_key(proposal.parent_key)
-            parent_target = None if parent_sample is None else self._target(parent_sample.value)
             value, added, improved = self._evaluate_point(point, source=source)
             if not added:
                 continue
@@ -890,24 +928,6 @@ class PointCloudSmoothLifeSearch:
                 region_attempts[region_id] += 1
                 if improved:
                     region_improvements[region_id] += 1
-            relative_amount = 0.0
-            relative_success = False
-            if parent_target is not None and value is not None:
-                relative_amount = max(0.0, parent_target - self._target(float(value)))
-                relative_success = relative_amount > float(self.config.best_improvement_tolerance)
-            if relative_success:
-                source_relative_successes[source] += 1
-                weighted_amount = relative_amount * float(self.config.relative_success_credit)
-                source_relative_amounts[source] += weighted_amount
-                if parent_sample is not None:
-                    self._record_successful_direction(parent_sample.point, clipped)
-                if proposal_axes is not None and proposal_axes.size > 0:
-                    self._axis_activity *= 0.999
-                    self._axis_activity[proposal_axes] += max(relative_amount, 1e-12)
-                if proposal.shade_params is not None:
-                    shade_successes.append((float(proposal.shade_params[0]), float(proposal.shade_params[1]), weighted_amount))
-                if proposal.family == "cma" and proposal.region_id is not None:
-                    cma_successes.append((int(proposal.region_id), clipped.copy(), weighted_amount))
             if improved:
                 improvements += 1
                 source_improvements[source] += 1
@@ -917,18 +937,16 @@ class PointCloudSmoothLifeSearch:
                     if proposal_axes is not None and proposal_axes.size > 0:
                         self._axis_activity *= 0.999
                         self._axis_activity[proposal_axes] += max(amount, 1e-12)
-                    if proposal.shade_params is not None and not relative_success:
-                        shade_successes.append((float(proposal.shade_params[0]), float(proposal.shade_params[1]), amount))
-                    if proposal.family == "cma" and proposal.region_id is not None and not relative_success:
-                        cma_successes.append((int(proposal.region_id), clipped.copy(), amount))
+                        if proposal.source.startswith("cooperative:"):
+                            self._last_cooperative_improved_axes = tuple(int(axis) for axis in proposal_axes)
         after = len(self.archive)
         self._apply_region_feedback(region_attempts, region_improvements)
-        credit_improvements = source_improvements + source_relative_successes
-        credit_amounts = source_improvement_amounts + source_relative_amounts
-        self._record_source_results(source_attempts, source_counts, credit_improvements, credit_amounts)
-        self._update_shade_memory(shade_successes)
-        self._apply_cma_feedback(source_counts, source_improvements, cma_successes)
-        self._refresh_live_population()
+        self._record_source_results(
+            source_attempts,
+            source_counts,
+            source_improvements,
+            source_improvement_amounts,
+        )
         return PointCloudBatchEvent(
             batch_index=self._batch_index,
             kind="candidate_batch",
@@ -944,11 +962,7 @@ class PointCloudSmoothLifeSearch:
                 "improvements": int(improvements),
                 "source_improvements": dict(source_improvements),
                 "source_improvement_amounts": dict(source_improvement_amounts),
-                "source_relative_successes": dict(source_relative_successes),
-                "source_relative_amounts": dict(source_relative_amounts),
-                "source_credit": self._source_stats_payload(),
-                "shade_successes": int(len(shade_successes)),
-                "cma_successes": int(len(cma_successes)),
+                "source_stats": self._source_stats_payload(),
                 "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
                 "active_set_size": int(self._active_set_axes().size) if self._cooperative_refinement_active() else 0,
                 "cooperative_improvements": int(
@@ -962,6 +976,7 @@ class PointCloudSmoothLifeSearch:
                 if self._cooperative_refinement_active()
                 else [],
                 "axis_coverage_max": float(np.max(self._axis_coverage)) if self._axis_coverage.size else 0.0,
+                "projection_frame_count": int(self._last_projection_frame_count),
                 "basin_polishing_active": bool(self._basin_polishing_active()),
                 "anchor_baseline_target": (
                     None if self._anchor_baseline_target is None else float(self._anchor_baseline_target)
@@ -973,6 +988,8 @@ class PointCloudSmoothLifeSearch:
                 "surrogate_ranked_candidates": int(
                     sum(1 for proposal in proposals if proposal.predicted_score is not None)
                 ),
+                "surrogate_reliability": float(self._last_surrogate_reliability),
+                "surrogate_rank_weight": float(self._last_surrogate_rank_weight),
                 "rotated_stencil_improvements": int(
                     sum(count for source, count in source_improvements.items() if source.endswith(":rotated_stencil"))
                 ),
@@ -984,85 +1001,6 @@ class PointCloudSmoothLifeSearch:
                 "archive_size": int(after),
             },
         )
-
-    def _update_shade_memory(self, successes: list[tuple[float, float, float]]) -> None:
-        if not successes:
-            return
-        f_values = np.asarray([entry[0] for entry in successes], dtype=float)
-        cr_values = np.asarray([entry[1] for entry in successes], dtype=float)
-        weights = np.asarray([max(entry[2], 0.0) for entry in successes], dtype=float)
-        if not np.any(weights > 0.0):
-            weights = np.ones_like(f_values)
-        weights = weights / max(float(np.sum(weights)), 1e-12)
-        f_denominator = max(float(np.sum(weights * f_values)), 1e-12)
-        mean_f = float(np.sum(weights * f_values * f_values) / f_denominator)
-        mean_cr = float(np.sum(weights * cr_values))
-        index = int(self._shade_memory_index % self._shade_f_memory.size)
-        self._shade_f_memory[index] = float(np.clip(mean_f, 0.05, 1.0))
-        self._shade_cr_memory[index] = float(np.clip(mean_cr, 0.0, 1.0))
-        self._shade_memory_index += 1
-
-    def _cma_state_for_region(self, region: PointCloudRegion) -> CMARegionState:
-        state = self._cma_states.get(region.region_id)
-        if state is not None and state.diagonal_variance.shape == (self.dimension,):
-            return state
-        state = CMARegionState(
-            sigma=float(self.config.cma_sigma_init),
-            diagonal_variance=np.ones(self.dimension, dtype=float),
-            evolution_path=np.zeros(self.dimension, dtype=float),
-            directions=[],
-        )
-        self._cma_states[region.region_id] = state
-        return state
-
-    def _apply_cma_feedback(
-        self,
-        evaluations: Counter[str],
-        improvements: Counter[str],
-        successes: list[tuple[int, np.ndarray, float]],
-    ) -> None:
-        if not self._evolutionary_search_active() or not self.config.cma_region_enabled:
-            return
-        regions_by_id = {region.region_id: region for region in self.regions}
-        successful_region_ids: set[int] = set()
-        for region_id, point, _amount in successes:
-            region = regions_by_id.get(region_id)
-            if region is None:
-                continue
-            state = self._cma_state_for_region(region)
-            step = self._normalized_point(point) - self._normalized_point(region.center)
-            norm = float(np.linalg.norm(step))
-            if norm <= 1e-14 or not np.isfinite(norm):
-                continue
-            direction = step / norm
-            state.evolution_path = 0.80 * state.evolution_path + 0.20 * direction
-            scaled = np.square(np.clip(step / max(state.sigma, 1e-12), -5.0, 5.0))
-            state.diagonal_variance = np.clip(0.90 * state.diagonal_variance + 0.10 * scaled, 0.05, 20.0)
-            state.directions.append(direction.copy())
-            del state.directions[:-int(self.config.cma_direction_memory_size)]
-            state.success_rate_ema = 0.80 * state.success_rate_ema + 0.20
-            state.sigma = float(np.clip(state.sigma * 1.15, float(self.config.region_min_radius_fraction), 0.50))
-            successful_region_ids.add(region_id)
-        cma_attempt_regions: set[int] = set()
-        for source, count in evaluations.items():
-            if count <= 0 or self._source_family(source) != "cma":
-                continue
-            parts = source.split(":")
-            if len(parts) < 3:
-                continue
-            try:
-                cma_attempt_regions.add(int(parts[1]))
-            except ValueError:
-                continue
-        for region_id in cma_attempt_regions - successful_region_ids:
-            region = regions_by_id.get(region_id)
-            if region is None:
-                continue
-            state = self._cma_state_for_region(region)
-            state.success_rate_ema = 0.85 * state.success_rate_ema
-            state.sigma = float(
-                np.clip(state.sigma * 0.92, float(self.config.region_min_radius_fraction), 0.50)
-            )
 
     def _apply_region_feedback(self, attempts: Counter[int], improvements: Counter[int]) -> None:
         if not attempts:
@@ -1143,7 +1081,10 @@ class PointCloudSmoothLifeSearch:
         desirability = 1.0 - (target - min_value) / span
         return np.clip(np.where(finite, desirability, 0.0), 0.0, 1.0)
 
-    def _density_view(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _density_view_for_frame(
+        self,
+        frame: tuple[str, tuple[int, int], np.ndarray, np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         shape = self.config.density_grid_shape
         points, values = self.archive.arrays()
         if points.size == 0:
@@ -1160,7 +1101,6 @@ class PointCloudSmoothLifeSearch:
         bounds = self.original_bounds
         widths = bounds[:, 1] - bounds[:, 0]
         normalized_points = (points - bounds[:, 0]) / widths
-        frame = self._density_projection_frame()
         projected_points = self._project_normalized_points(normalized_points, frame)
         desirability = self._normalize_values_to_desirability(values)
         elite = self.archive.elite_indices(
@@ -1221,6 +1161,33 @@ class PointCloudSmoothLifeSearch:
             density = np.clip(0.85 * density + 0.15 * neighbors + 0.05 * lap, 0.0, None)
         density = density / max(float(np.max(density)), 1e-12)
         objective = objective / max(float(np.max(objective)), 1e-12)
+        return density, objective, evaluated
+
+    def _density_view(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        shape = self.config.density_grid_shape
+        frames = self._density_projection_frames()
+        if not frames:
+            empty = np.zeros(shape, dtype=float)
+            self._last_density_frames = []
+            self._last_projection_frame_count = 0
+            return empty, empty.copy(), np.zeros(shape, dtype=bool)
+        frame_views = [(frame, *self._density_view_for_frame(frame)) for frame in frames]
+        weights = np.ones(len(frame_views), dtype=float)
+        if len(weights) > 1:
+            weights[0] = 1.25
+        weights = weights / max(float(np.sum(weights)), 1e-12)
+        density = np.zeros(shape, dtype=float)
+        objective = np.zeros(shape, dtype=float)
+        evaluated = np.zeros(shape, dtype=bool)
+        self._last_density_frames = []
+        for weight, (frame, frame_density, frame_objective, frame_evaluated) in zip(weights, frame_views):
+            density += float(weight) * np.asarray(frame_density, dtype=float)
+            objective = np.maximum(objective, np.asarray(frame_objective, dtype=float))
+            evaluated |= np.asarray(frame_evaluated, dtype=bool)
+            self._last_density_frames.append((frame, np.asarray(frame_density, dtype=float).copy()))
+        density = density / max(float(np.max(density)), 1e-12)
+        objective = objective / max(float(np.max(objective)), 1e-12)
+        self._last_projection_frame_count = len(self._last_density_frames)
         return density, objective, evaluated
 
     def _refresh_views(self) -> None:
@@ -1378,13 +1345,6 @@ class PointCloudSmoothLifeSearch:
     def _sleeping_region_count(self) -> int:
         return len(self.regions) - len(self._active_regions())
 
-    def _restart_pressure_active(self) -> bool:
-        if not self.config.restart_strategy_enabled or not self._evolutionary_search_active():
-            return False
-        if self.regions and not self._active_regions():
-            return True
-        return int(self._batch_index) - int(self._last_improvement_batch) >= int(self.config.restart_stall_batches)
-
     def _wake_incumbent_region_if_all_sleeping(self) -> None:
         if not self.regions or self._active_regions():
             return
@@ -1435,59 +1395,18 @@ class PointCloudSmoothLifeSearch:
             }
             return self._counts_from_weights(limit, fractions)
 
-        weights = {
-            "global": max(float(self.config.global_candidate_fraction), 0.10),
-            "smoothlife_density": max(float(self.config.density_candidate_fraction), 0.08),
-            "region": float(self.config.region_candidate_fraction if self.config.trust_regions_enabled else 0.0),
-            "exploit": max(float(self.config.exploit_candidate_fraction) * 0.50, 0.04),
-            "coherent": (0.18 if self._cooperative_refinement_active() else 0.08)
-            if self.config.coherent_probes_enabled
-            else 0.0,
-            "shade": 0.30 if self.config.shade_enabled else 0.0,
-            "cma": 0.24 if self.config.cma_region_enabled and self.config.trust_regions_enabled else 0.0,
-            "cooperative": 0.10 if self._cooperative_refinement_active() else 0.0,
-            "restart": (
-                (0.16 if self._restart_pressure_active() else max(0.03, float(self.config.source_exploration_floor)))
-                if self.config.restart_strategy_enabled
-                else 0.0
-            ),
-        }
-        if self._basin_polishing_active():
-            weights = {
-                "global": max(float(self.config.source_exploration_floor), 0.02),
-                "smoothlife_density": 0.08,
-                "region": 0.22 if self.config.trust_regions_enabled else 0.0,
-                "exploit": 0.22,
-                "coherent": (0.18 if self._cooperative_refinement_active() else 0.10)
-                if self.config.coherent_probes_enabled
-                else 0.0,
-                "shade": 0.16 if self.config.shade_enabled else 0.0,
-                "cma": 0.24 if self.config.cma_region_enabled and self.config.trust_regions_enabled else 0.0,
-                "cooperative": 0.18 if self._cooperative_refinement_active() else 0.0,
-                "restart": max(float(self.config.source_exploration_floor), 0.02)
-                if self.config.restart_strategy_enabled and self._restart_pressure_active()
-                else 0.0,
-            }
-        weights = {source: weight for source, weight in weights.items() if weight > 0.0}
-        if self.config.source_adaptation_enabled and len(weights) > 1 and self._source_stats:
-            keys = list(weights)
-            base = np.asarray([weights[key] for key in keys], dtype=float)
-            base = base / max(float(np.sum(base)), 1e-12)
-            scores = np.asarray(
-                [
-                    self._source_stats.get(key, SourceStats()).ema_credit
-                    / max(float(self.config.source_credit_temperature), 1e-12)
-                    for key in keys
-                ],
-                dtype=float,
+        weights = lean_stage_weights(
+            StageAllocationState(
+                dimension=self.dimension,
+                evolutionary_active=True,
+                basin_polishing_active=self._basin_polishing_active(),
+                deep_basin_polishing_active=self._deep_basin_polishing_active(),
+                cooperative_active=self._cooperative_refinement_active(),
+                cooperative_heavy=self._cooperative_heavy_allocation_active(),
+                trust_regions_enabled=bool(self.config.trust_regions_enabled),
+                coherent_probes_enabled=bool(self.config.coherent_probes_enabled),
             )
-            scores -= float(np.max(scores))
-            adaptive = np.exp(np.clip(scores, -60.0, 60.0))
-            adaptive = adaptive / max(float(np.sum(adaptive)), 1e-12)
-            blended = 0.85 * base + 0.15 * adaptive
-            floor = min(float(self.config.source_exploration_floor), 0.90 / len(keys))
-            blended = floor + max(0.0, 1.0 - floor * len(keys)) * blended / max(float(np.sum(blended)), 1e-12)
-            weights = dict(zip(keys, blended))
+        )
         return self._counts_from_weights(limit, weights)
 
     @staticmethod
@@ -1541,28 +1460,40 @@ class PointCloudSmoothLifeSearch:
     def _density_candidates(self, count: int, *, source_label: str = "density") -> list[CandidateProposal]:
         if count <= 0:
             return []
-        density = np.asarray(self._last_density, dtype=float)
         global_count = min(count, int(np.ceil(count * float(self.config.global_exploration_floor))))
         density_count = count - global_count
         candidates = self._global_candidates(global_count)
         if density_count <= 0:
             return candidates
-        flat = density.ravel()
-        if not np.any(flat > 0.0):
+        if not self._last_density_frames:
+            self._refresh_views()
+        frame_densities = [
+            (frame, np.asarray(density, dtype=float))
+            for frame, density in self._last_density_frames
+            if np.any(np.asarray(density, dtype=float) > 0.0)
+        ]
+        if not frame_densities:
             return self._global_candidates(count)
-        probabilities = flat / float(np.sum(flat))
-        chosen = self.rng.choice(flat.size, size=density_count, replace=True, p=probabilities)
-        height, width = density.shape
-        rows, cols = np.unravel_index(chosen, density.shape)
-        jitter = self.rng.random((density_count, 2))
-        normalized_x = (cols.astype(float) + jitter[:, 0]) / width
-        normalized_y = (rows.astype(float) + jitter[:, 1]) / height
         lower = self.original_bounds[:, 0]
         widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
-        frame = self._density_projection_frame()
-        normalized_points = self._lift_density_points(np.column_stack((normalized_x, normalized_y)), frame)
-        points = lower + normalized_points * widths
-        candidates.extend(self._proposal(point, source_label) for point in points)
+        frame_count = len(frame_densities)
+        slots = [density_count // frame_count] * frame_count
+        for index in range(density_count % frame_count):
+            slots[index] += 1
+        for slot_count, (frame, density) in zip(slots, frame_densities):
+            if slot_count <= 0:
+                continue
+            flat = density.ravel()
+            probabilities = flat / float(np.sum(flat))
+            chosen = self.rng.choice(flat.size, size=slot_count, replace=True, p=probabilities)
+            height, width = density.shape
+            rows, cols = np.unravel_index(chosen, density.shape)
+            jitter = self.rng.random((slot_count, 2))
+            normalized_x = (cols.astype(float) + jitter[:, 0]) / width
+            normalized_y = (rows.astype(float) + jitter[:, 1]) / height
+            normalized_points = self._lift_density_points(np.column_stack((normalized_x, normalized_y)), frame)
+            points = lower + normalized_points * widths
+            candidates.extend(self._proposal(point, source_label) for point in points)
         return candidates
 
     def _coherent_candidates(self, count: int) -> list[CandidateProposal]:
@@ -1574,17 +1505,18 @@ class PointCloudSmoothLifeSearch:
         ):
             return []
         normalized_best = np.clip(self._normalized_point(self.best_point), 0.0, 1.0)
+        heavy_cooperative = self._cooperative_heavy_allocation_active()
         quantiles = (
             (0.80, 0.88, 0.92, 0.95, 0.98, 0.985, 0.992, 0.997)
-            if self._cooperative_refinement_active()
+            if heavy_cooperative
             else (0.80, 0.88, 0.92, 0.95, 0.98)
         )
         spread = float(np.std(normalized_best))
         jitter_scale = float(
             np.clip(
-                0.04 * spread if self._cooperative_refinement_active() else 0.03 * spread,
-                5e-4 if self._cooperative_refinement_active() else 2e-4,
-                1.5e-3 if self._cooperative_refinement_active() else 8e-4,
+                0.04 * spread if heavy_cooperative else 0.03 * spread,
+                5e-4 if heavy_cooperative else 2e-4,
+                1.5e-3 if heavy_cooperative else 8e-4,
             )
         )
         candidates: list[CandidateProposal] = []
@@ -1797,142 +1729,6 @@ class PointCloudSmoothLifeSearch:
             candidates.append(self._proposal(point, "exploit", parent_key=parent_key))
         return candidates
 
-    def _shade_candidates(self, count: int) -> list[CandidateProposal]:
-        if count <= 0 or not self.config.shade_enabled or not self._evolutionary_search_active():
-            return []
-        population_points, population_values, population_keys = self._live_population_arrays()
-        if population_points.shape[0] < 4:
-            population_points, population_values = self.archive.arrays()
-            population_keys = [PointCloudArchive.key(point) for point in population_points]
-        if population_points.shape[0] < 4:
-            return self._global_candidates(count)
-        archive_points, archive_values = self.archive.arrays()
-        population_target = -population_values if self.smoothlife_config.maximize else population_values
-        population_order = np.argsort(population_target)
-        elite_count = max(
-            2,
-            min(
-                population_points.shape[0],
-                int(np.ceil(float(self.config.shade_pbest_fraction) * population_points.shape[0])),
-            ),
-        )
-        elite_indices = population_order[:elite_count]
-        archive_target = -archive_values if self.smoothlife_config.maximize else archive_values
-        archive_order = np.argsort(archive_target)
-        archive_pool_count = max(
-            4,
-            min(
-                archive_points.shape[0],
-                int(np.ceil(float(self.config.shade_archive_fraction) * archive_points.shape[0])),
-            ),
-        )
-        pool_parts = [population_points]
-        if archive_points.shape[0] > 0:
-            pool_parts.append(archive_points[archive_order[:archive_pool_count]])
-        difference_pool = np.vstack(pool_parts)
-        lower = self.original_bounds[:, 0]
-        widths = self.original_bounds[:, 1] - lower
-        candidates: list[CandidateProposal] = []
-        seen: set[tuple[str, ...]] = set()
-        attempts = 0
-        while len(candidates) < count and attempts < count * 8:
-            attempts += 1
-            memory_index = int(self.rng.integers(0, self._shade_f_memory.size))
-            f = float(self._shade_f_memory[memory_index] + 0.10 * self.rng.standard_cauchy())
-            for _ in range(8):
-                if f > 0.0:
-                    break
-                f = float(self._shade_f_memory[memory_index] + 0.10 * self.rng.standard_cauchy())
-            f = float(np.clip(f, 0.05, 1.0))
-            cr = float(np.clip(self.rng.normal(float(self._shade_cr_memory[memory_index]), 0.10), 0.0, 1.0))
-            current_index = int(self.rng.integers(0, population_points.shape[0]))
-            pbest_index = int(self.rng.choice(elite_indices))
-            if difference_pool.shape[0] >= 2:
-                difference_indices = self.rng.choice(difference_pool.shape[0], size=2, replace=False)
-            else:
-                difference_indices = self.rng.choice(population_points.shape[0], size=2, replace=False)
-            current = population_points[current_index]
-            mutant = current + f * (population_points[pbest_index] - current) + f * (
-                difference_pool[int(difference_indices[0])] - difference_pool[int(difference_indices[1])]
-            )
-            mask = self.rng.random(self.dimension) < cr
-            if not np.any(mask):
-                mask[int(self.rng.integers(0, self.dimension))] = True
-            trial = current.copy()
-            trial[mask] = mutant[mask]
-            trial = self._clip_point(trial)
-            key = PointCloudArchive.key(trial)
-            if key in seen or self.archive.get(trial) is not None:
-                jitter = self.rng.normal(0.0, 0.0025 * widths, size=self.dimension)
-                trial = self._clip_point(trial + jitter)
-                key = PointCloudArchive.key(trial)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(
-                self._proposal(
-                    trial,
-                    "shade",
-                    parent_key=population_keys[current_index],
-                    shade_params=(f, cr),
-                )
-            )
-        if len(candidates) < count:
-            candidates.extend(self._global_candidates(count - len(candidates)))
-        return candidates[:count]
-
-    def _cma_region_candidates(self, count: int) -> list[CandidateProposal]:
-        if (
-            count <= 0
-            or not self.config.cma_region_enabled
-            or not self.config.trust_regions_enabled
-            or not self._evolutionary_search_active()
-        ):
-            return []
-        self._wake_incumbent_region_if_all_sleeping()
-        active_regions = self._active_regions()
-        if not active_regions:
-            return []
-        candidates: list[CandidateProposal] = []
-        per_region = max(1, int(np.ceil(count / len(active_regions))))
-        for region in active_regions:
-            state = self._cma_state_for_region(region)
-            normalized_center = self._normalized_point(region.center)
-            direction_count = len(state.directions)
-            parent_key = self._nearest_archive_key(region.center)
-            for _ in range(per_region):
-                diagonal_noise = self.rng.normal(0.0, np.sqrt(state.diagonal_variance), size=self.dimension)
-                offset = float(state.sigma) * diagonal_noise
-                if direction_count:
-                    coefficients = self.rng.normal(
-                        0.0,
-                        float(state.sigma) / max(np.sqrt(direction_count), 1.0),
-                        size=direction_count,
-                    )
-                    low_rank = np.sum(
-                        [coefficient * direction for coefficient, direction in zip(coefficients, state.directions)],
-                        axis=0,
-                    )
-                    offset = offset + low_rank
-                if np.linalg.norm(state.evolution_path) > 1e-12:
-                    offset = offset + self.rng.normal(0.0, 0.35 * float(state.sigma)) * state.evolution_path
-                max_radius = max(float(region.radius_fraction), float(self.config.region_min_radius_fraction))
-                norm = float(np.linalg.norm(offset))
-                if norm > max_radius:
-                    offset = offset * (max_radius / norm)
-                point = self._point_from_normalized(np.clip(normalized_center + offset, 0.0, 1.0))
-                candidates.append(
-                    self._proposal(
-                        point,
-                        f"region:{region.region_id}:cma",
-                        parent_key=parent_key,
-                        region_id=region.region_id,
-                    )
-                )
-                if len(candidates) >= count:
-                    return candidates
-        return candidates[:count]
-
     def _cooperative_candidates(self, count: int) -> list[CandidateProposal]:
         if count <= 0 or not self._cooperative_refinement_active():
             return []
@@ -1966,10 +1762,6 @@ class PointCloudSmoothLifeSearch:
         for step, _gradient_delta in self._lbfgs_pairs[-2:]:
             directions.append(np.asarray(step, dtype=float))
 
-        population_points, population_values, population_keys = self._live_population_arrays()
-        population_target = -population_values if self.smoothlife_config.maximize else population_values
-        population_order = np.argsort(population_target) if population_values.size else np.asarray([], dtype=int)
-
         for group in groups:
             if len(candidates) >= count:
                 break
@@ -2002,77 +1794,16 @@ class PointCloudSmoothLifeSearch:
                     )
                     if len(candidates) >= count:
                         return candidates[:count]
-            if population_points.shape[0] >= 4 and population_order.size > 0:
-                current_index = int(self.rng.integers(0, population_points.shape[0]))
-                elite_count = max(1, min(population_points.shape[0], int(np.ceil(0.20 * population_points.shape[0]))))
-                pbest_index = int(self.rng.choice(population_order[:elite_count]))
-                diff_indices = self.rng.choice(population_points.shape[0], size=2, replace=False)
-                current = self._normalized_point(population_points[current_index])
-                pbest = self._normalized_point(population_points[pbest_index])
-                first = self._normalized_point(population_points[int(diff_indices[0])])
-                second = self._normalized_point(population_points[int(diff_indices[1])])
-                mutant = current.copy()
-                f = float(np.clip(self._shade_f_memory[self._shade_memory_index % self._shade_f_memory.size], 0.05, 1.0))
-                mutant[axes] = current[axes] + f * (pbest[axes] - current[axes]) + 0.5 * f * (first[axes] - second[axes])
-                trial = normalized_best.copy()
-                trial[axes] = mutant[axes]
-                add_candidate(
-                    np.clip(trial, 0.0, 1.0),
-                    "cooperative:de",
-                    axes,
-                    parent=population_keys[current_index],
-                )
-                if len(candidates) >= count:
-                    return candidates[:count]
             noise = np.zeros(self.dimension, dtype=float)
-            scale = max(step_base, float(self.config.cma_sigma_init) * 0.20)
-            noise[axes] = self.rng.normal(0.0, scale, size=axes.size)
+            noise[axes] = self.rng.normal(0.0, step_base, size=axes.size)
             add_candidate(
                 normalized_best + noise,
-                "cooperative:cma",
+                "cooperative:group",
                 axes,
             )
         if len(candidates) < count:
             candidates.extend(self._global_candidates(count - len(candidates)))
         return candidates[:count]
-
-    def _restart_candidates(self, count: int) -> list[CandidateProposal]:
-        if count <= 0 or not self.config.restart_strategy_enabled or not self._evolutionary_search_active():
-            return []
-        candidates: list[CandidateProposal] = []
-        bases = self._first_primes(self.dimension)
-        axis_indices = np.arange(self.dimension, dtype=float)
-        golden = (np.sqrt(5.0) - 1.0) * 0.5
-        attempts = 0
-        while len(candidates) < count and attempts < max(count * 16, 32):
-            attempts += 1
-            sequence_index = self._restart_lattice_index + 1
-            self._restart_lattice_index += 1
-            axis_lattice = np.asarray(
-                [
-                    self._van_der_corput(sequence_index + 17 * (axis + 1), base)
-                    for axis, base in enumerate(bases)
-                ],
-                dtype=float,
-            )
-            axis_jitter = np.mod(self._restart_axis_shift + golden * (axis_indices + sequence_index), 1.0)
-            global_level = self._van_der_corput(sequence_index, 2)
-            normalized = 0.55 * np.mod(axis_lattice + self._restart_axis_shift, 1.0)
-            normalized += 0.30 * axis_jitter
-            normalized += 0.15 * global_level
-            normalized = np.clip(normalized, 0.02, 0.98)
-            if self.dimension >= int(self.config.high_dimensional_min_dimension) and float(np.var(normalized)) < 1e-4:
-                normalized = np.mod(normalized + golden * (axis_indices + 1.0), 1.0)
-                normalized = np.clip(normalized, 0.02, 0.98)
-            if self.dimension >= int(self.config.high_dimensional_min_dimension) and float(np.var(normalized)) < 1e-4:
-                continue
-            point = self._point_from_normalized(normalized)
-            if self.archive.get(point) is not None:
-                continue
-            candidates.append(self._proposal(point, "restart:scout"))
-        if len(candidates) < count:
-            candidates.extend(self._global_candidates(count - len(candidates)))
-        return candidates
 
     def _surrogate_ranking_active(self) -> bool:
         return bool(
@@ -2110,6 +1841,52 @@ class PointCloudSmoothLifeSearch:
             seen.add(key)
             proposals.append(proposal)
         return proposals
+
+    def _surrogate_reliability_score(
+        self,
+        archive_normalized: np.ndarray,
+        target: np.ndarray,
+        neighbor_count: int,
+    ) -> float:
+        if not self.config.surrogate_reliability_enabled:
+            return 1.0
+        sample_count = int(archive_normalized.shape[0])
+        if sample_count < max(8, min(int(neighbor_count), 8)):
+            return 0.5
+        selected_count = min(sample_count, 48)
+        if selected_count < sample_count:
+            order = np.argsort(target)
+            elite_count = max(1, selected_count // 2)
+            spread = np.linspace(0, sample_count - 1, num=selected_count - elite_count, dtype=int)
+            selected = np.asarray(list(dict.fromkeys([*order[:elite_count].tolist(), *spread.tolist()])), dtype=int)
+            selected = selected[:selected_count]
+        else:
+            selected = np.arange(sample_count, dtype=int)
+        predictions: list[float] = []
+        actual: list[float] = []
+        k = max(3, min(int(neighbor_count), sample_count - 1))
+        for index in selected:
+            distances = np.linalg.norm(archive_normalized - archive_normalized[int(index)], axis=1)
+            distances[int(index)] = np.inf
+            if k < distances.size:
+                neighbor_indices = np.argpartition(distances, k - 1)[:k]
+            else:
+                neighbor_indices = np.flatnonzero(np.isfinite(distances))
+            if neighbor_indices.size == 0:
+                continue
+            weights = 1.0 / np.maximum(distances[neighbor_indices], 1e-8)
+            predictions.append(float(np.dot(weights, target[neighbor_indices]) / max(float(np.sum(weights)), 1e-12)))
+            actual.append(float(target[int(index)]))
+        if len(predictions) < 4:
+            return 0.5
+        predicted = np.asarray(predictions, dtype=float)
+        observed = np.asarray(actual, dtype=float)
+        if float(np.std(predicted)) <= 1e-12 or float(np.std(observed)) <= 1e-12:
+            return 0.5
+        correlation = float(np.corrcoef(predicted, observed)[0, 1])
+        if not np.isfinite(correlation):
+            return 0.5
+        return float(np.clip(correlation, 0.0, 1.0))
 
     def _rank_candidate_pool(
         self,
@@ -2153,8 +1930,19 @@ class PointCloudSmoothLifeSearch:
         neighbor_count = min(int(self.config.surrogate_ranking_neighbor_count), archive_points.shape[0])
         predictions: list[float] = []
         novelty_values: list[float] = []
-        parent_gains: list[float] = []
-        credits: list[float] = []
+        reliability = self._surrogate_reliability_score(archive_normalized, target, neighbor_count)
+        if self.config.surrogate_reliability_enabled:
+            prediction_weight = float(
+                self.config.surrogate_rank_weight_min
+                + reliability
+                * (float(self.config.surrogate_rank_weight_max) - float(self.config.surrogate_rank_weight_min))
+            )
+            novelty_weight = 0.12 + 0.20 * (1.0 - reliability)
+        else:
+            prediction_weight = 1.0
+            novelty_weight = 0.12
+        self._last_surrogate_reliability = float(reliability)
+        self._last_surrogate_rank_weight = float(prediction_weight)
 
         for proposal in proposals:
             normalized = ((proposal.point - self.original_bounds[:, 0]) / widths)[axes]
@@ -2167,30 +1955,18 @@ class PointCloudSmoothLifeSearch:
             weights = 1.0 / np.maximum(neighbor_distances, 1e-8)
             prediction = float(np.dot(weights, target[neighbor_indices]) / max(float(np.sum(weights)), 1e-12))
             novelty = float(np.min(distances)) if distances.size else 1.0
-            parent_sample = self._sample_by_key(proposal.parent_key)
-            parent_gain = 0.0
-            if parent_sample is not None:
-                parent_gain = max(0.0, self._target(parent_sample.value) - prediction)
             predictions.append(prediction)
             novelty_values.append(novelty)
-            parent_gains.append(parent_gain)
-            credits.append(float(self._source_stats.get(proposal.family, SourceStats()).ema_credit))
 
         predicted_array = np.asarray(predictions, dtype=float)
         novelty_array = np.asarray(novelty_values, dtype=float)
-        parent_gain_array = np.asarray(parent_gains, dtype=float)
-        credit_array = np.asarray(credits, dtype=float)
 
         def normalized(values: np.ndarray) -> np.ndarray:
             span = max(float(np.max(values) - np.min(values)), 1e-12)
             return (values - float(np.min(values))) / span
 
-        score = normalized(predicted_array)
-        score -= 0.12 * normalized(novelty_array)
-        if np.any(parent_gain_array > 0.0):
-            score -= 0.10 * normalized(parent_gain_array)
-        if np.any(credit_array > 0.0):
-            score -= 0.06 * normalized(credit_array)
+        score = prediction_weight * normalized(predicted_array)
+        score -= novelty_weight * normalized(novelty_array)
 
         for proposal, value in zip(proposals, score):
             proposal.predicted_score = float(value)
@@ -2269,10 +2045,7 @@ class PointCloudSmoothLifeSearch:
         )
         candidates.extend(self._region_candidates(counts.get("region", 0)))
         candidates.extend(self._coherent_candidates(counts.get("coherent", 0)))
-        candidates.extend(self._shade_candidates(counts.get("shade", 0)))
-        candidates.extend(self._cma_region_candidates(counts.get("cma", 0)))
         candidates.extend(self._cooperative_candidates(counts.get("cooperative", 0)))
-        candidates.extend(self._restart_candidates(counts.get("restart", 0)))
         candidates.extend(self._exploit_candidates(counts.get("exploit", 0)))
         return candidates
 
@@ -2821,6 +2594,8 @@ class PointCloudSmoothLifeSearch:
         return event
 
     def _block_size(self) -> int:
+        if self.dimension <= max(12, int(self.config.active_subspace_size) * 2):
+            return self.dimension
         return min(self.dimension, max(1, int(self.config.active_subspace_size)))
 
     def _block_starts(self) -> list[int]:
@@ -3106,10 +2881,6 @@ class PointCloudSmoothLifeSearch:
         if geometry.basis.shape[0] == self.dimension:
             for axis in range(min(geometry.basis.shape[1], int(self.config.active_subspace_size))):
                 add(np.asarray(geometry.basis[:, axis], dtype=float))
-        for state in self._cma_states.values():
-            add(state.evolution_path)
-            for direction in state.directions[-2:]:
-                add(direction)
         if self._lbfgs_pairs:
             for step, _gradient_delta in self._lbfgs_pairs[-4:]:
                 add(step)
@@ -3124,14 +2895,27 @@ class PointCloudSmoothLifeSearch:
     def _run_direction_refinement(self) -> PointCloudBatchEvent | None:
         if not (
             self.config.direction_refinement_enabled
-            and self._evolutionary_search_active()
             and np.isfinite(self.best_value)
             and self._remaining() > 0
         ):
             return None
-        if not self._basin_polishing_active() and self.config.local_refinement_enabled:
+        if (
+            not self._basin_polishing_active()
+            and self.dimension > 2
+            and self.dimension < int(self.config.high_dimensional_min_dimension)
+        ):
             return None
-        if not self._basin_polishing_active() and len(self._successful_directions) < 2:
+        if (
+            not self._basin_polishing_active()
+            and self.config.local_refinement_enabled
+            and not self._local_refinement_stalled
+        ):
+            return None
+        if (
+            not self._basin_polishing_active()
+            and self.config.local_refinement_enabled
+            and len(self._successful_directions) < 2
+        ):
             return None
         max_new = min(int(self.config.direction_refinement_max_evaluations), self._remaining())
         if max_new <= 0:
@@ -3151,6 +2935,65 @@ class PointCloudSmoothLifeSearch:
             0.08,
             max(float(self.config.region_min_radius_fraction) * 10.0, float(self._stencil_step_fraction)),
         )
+        min_step = float(self.config.direction_line_search_min_step_fraction)
+        bracketed = self.config.direction_line_search_mode == "bracketed"
+        step_scales = (
+            [0.5**index for index in range(int(self.config.direction_line_search_max_steps))]
+            if bracketed
+            else [1.0]
+        )
+        quadratic_steps = 0
+        bracket_evaluations = 0
+
+        def evaluate_direction(
+            base_normalized: np.ndarray,
+            direction: np.ndarray,
+            signed_step: float,
+            source: str,
+        ) -> tuple[float | None, bool, bool]:
+            if len(self.archive) - before >= max_new or self._remaining() <= 0:
+                return None, False, False
+            current_before = float(self.best_value)
+            candidate = self._point_from_normalized(base_normalized + signed_step * direction)
+            source_attempts[source] += 1
+            value, added, improved = self._evaluate_point(candidate, source=source)
+            if not added:
+                return value, False, False
+            source_counts[source] += 1
+            if improved and value is not None:
+                nonlocal_improvement = max(0.0, self._target(current_before) - self._target(float(value)))
+                source_improvements[source] += 1
+                source_amounts[source] += nonlocal_improvement
+            return value, added, improved
+
+        def quadratic_candidate_step(samples: list[tuple[float, float]]) -> float | None:
+            unique: dict[float, float] = {}
+            for step, value in samples:
+                unique[round(float(step), 14)] = float(value)
+            if len(unique) < 3:
+                return None
+            steps = np.asarray(list(unique.keys()), dtype=float)
+            targets = np.asarray(list(unique.values()), dtype=float)
+            if not np.all(np.isfinite(steps)) or not np.all(np.isfinite(targets)):
+                return None
+            matrix = np.column_stack((steps * steps, steps, np.ones_like(steps)))
+            try:
+                a, b, _c = np.linalg.lstsq(matrix, targets, rcond=None)[0]
+            except np.linalg.LinAlgError:
+                return None
+            if not np.isfinite(a) or not np.isfinite(b) or float(a) <= 1e-14:
+                return None
+            candidate = float(-b / (2.0 * a))
+            low = float(np.min(steps))
+            high = float(np.max(steps))
+            if not low <= candidate <= high:
+                return None
+            if abs(candidate) < min_step:
+                return None
+            if np.any(np.isclose(candidate, steps, atol=min_step * 0.25, rtol=0.0)):
+                return None
+            return candidate
+
         passes = 0
         while len(self.archive) - before < max_new and self._remaining() > 0:
             passes += 1
@@ -3162,21 +3005,50 @@ class PointCloudSmoothLifeSearch:
                 for sign in (1.0, -1.0):
                     if len(self.archive) - before >= max_new or self._remaining() <= 0:
                         break
-                    current_before = float(self.best_value)
-                    candidate = self._point_from_normalized(normalized_center + sign * step_fraction * direction)
-                    source_attempts["direction_line_search"] += 1
-                    value, added, improved = self._evaluate_point(candidate, source="direction_line_search")
-                    if not added:
-                        continue
-                    source_counts["direction_line_search"] += 1
-                    if improved and value is not None:
-                        improvements += 1
-                        source_improvements["direction_line_search"] += 1
-                        source_amounts["direction_line_search"] += max(
-                            0.0,
-                            self._target(current_before) - self._target(float(value)),
+                    samples = [(0.0, self._target(float(self.best_value)))]
+                    for scale in step_scales:
+                        if len(self.archive) - before >= max_new or self._remaining() <= 0:
+                            break
+                        signed_step = sign * max(min_step, step_fraction * float(scale))
+                        value, added, improved = evaluate_direction(
+                            normalized_center,
+                            direction,
+                            signed_step,
+                            "direction_line_search",
                         )
+                        if added and value is not None:
+                            samples.append((signed_step, self._target(float(value))))
+                        if not improved or value is None:
+                            continue
+                        improvements += 1
                         improved_this_pass = True
+                        if bracketed and len(self.archive) - before < max_new and self._remaining() > 0:
+                            bracket_step = sign * min(0.25, max(abs(signed_step) * 1.6, abs(signed_step) + min_step))
+                            if abs(bracket_step) > abs(signed_step) + 1e-14:
+                                bracket_value, bracket_added, bracket_improved = evaluate_direction(
+                                    normalized_center,
+                                    direction,
+                                    bracket_step,
+                                    "direction_line_search",
+                                )
+                                if bracket_added and bracket_value is not None:
+                                    bracket_evaluations += 1
+                                    samples.append((bracket_step, self._target(float(bracket_value))))
+                                    if bracket_improved:
+                                        improvements += 1
+                        if bracketed and len(self.archive) - before < max_new and self._remaining() > 0:
+                            quadratic_step = quadratic_candidate_step(samples)
+                            if quadratic_step is not None:
+                                quadratic_value, quadratic_added, quadratic_improved = evaluate_direction(
+                                    normalized_center,
+                                    direction,
+                                    quadratic_step,
+                                    "direction_line_search",
+                                )
+                                if quadratic_added:
+                                    quadratic_steps += 1
+                                    if quadratic_improved and quadratic_value is not None:
+                                        improvements += 1
                         pattern_direction = (self.best_point - self._point_from_normalized(normalized_center)) / widths
                         pattern_norm = float(np.linalg.norm(pattern_direction))
                         if pattern_norm > 1e-14 and np.isfinite(pattern_norm):
@@ -3207,6 +3079,8 @@ class PointCloudSmoothLifeSearch:
                                 else:
                                     break
                         break
+                    if improved_this_pass:
+                        break
                 if improved_this_pass:
                     break
             if improved_this_pass:
@@ -3224,7 +3098,6 @@ class PointCloudSmoothLifeSearch:
         if after == before:
             return None
         self._record_source_results(source_attempts, source_counts, source_improvements, source_amounts)
-        self._refresh_live_population()
         return PointCloudBatchEvent(
             batch_index=self._batch_index,
             kind="direction_refinement",
@@ -3241,6 +3114,9 @@ class PointCloudSmoothLifeSearch:
                 "source_improvements": dict(source_improvements),
                 "direction_line_search_improvements": int(source_improvements.get("direction_line_search", 0)),
                 "direction_pattern_improvements": int(source_improvements.get("direction_pattern", 0)),
+                "direction_line_search_mode": self.config.direction_line_search_mode,
+                "direction_quadratic_steps": int(quadratic_steps),
+                "direction_bracket_evaluations": int(bracket_evaluations),
                 "successful_direction_memory_size": int(len(self._successful_directions)),
                 "basin_polishing_active": bool(self._basin_polishing_active()),
                 "anchor_baseline_target": (
@@ -3292,6 +3168,7 @@ class PointCloudSmoothLifeSearch:
                 improvements += 1
                 self._axis_activity *= 0.999
                 self._axis_activity[axes] += max(amount, 1e-12)
+                self._last_cooperative_improved_axes = tuple(int(axis) for axis in axes)
                 return True
             return False
 
@@ -3401,7 +3278,6 @@ class PointCloudSmoothLifeSearch:
         if after == before:
             return None
         self._record_source_results(source_attempts, source_counts, source_improvements, source_amounts)
-        self._refresh_live_population()
         top_axes = np.argsort(self._cooperative_axis_scores())[::-1][: min(8, self.dimension)]
         return PointCloudBatchEvent(
             batch_index=self._batch_index,
@@ -3419,105 +3295,18 @@ class PointCloudSmoothLifeSearch:
                 "source_improvements": dict(source_improvements),
                 "source_improvement_amounts": dict(source_amounts),
                 "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
+                "cooperative_frontier_enabled": bool(self.config.cooperative_frontier_enabled),
+                "cooperative_frontier_fraction": float(self.config.cooperative_frontier_fraction),
                 "active_set_size": int(self._active_set_axes().size),
                 "cooperative_groups_used": int(groups_used),
                 "cooperative_improvements": int(improvements),
                 "active_set_expansions": int(self._active_set_expansions),
+                "last_cooperative_improved_axes": [int(axis) for axis in self._last_cooperative_improved_axes],
                 "axis_coverage_max": float(np.max(self._axis_coverage)) if self._axis_coverage.size else 0.0,
                 "top_axis_scores": [
                     {"axis": int(axis), "score": float(self._cooperative_axis_scores()[axis])}
                     for axis in top_axes
                 ],
-                "archive_size": int(after),
-            },
-        )
-
-    def _run_stencil_refinement(self) -> PointCloudBatchEvent | None:
-        if not np.isfinite(self.best_value) or self._remaining() <= 0:
-            return None
-        before = len(self.archive)
-        best_before = float(self.best_value)
-        max_new = min(int(self._effective_batch_size()), self._remaining())
-        improvements = 0
-        source_counts: Counter[str] = Counter()
-        source_improvements: Counter[str] = Counter()
-        widths = self.original_bounds[:, 1] - self.original_bounds[:, 0]
-        min_step = float(self.config.region_min_radius_fraction)
-        max_step = float(self.config.region_initial_radius_fraction)
-        while len(self.archive) - before < max_new and self._remaining() > 0:
-            step = np.maximum(self._stencil_step_fraction * widths, min_step * widths)
-            improved_this_round = False
-            if self.config.surrogate_enabled:
-                surrogate = self._fit_point_surrogate(self.best_point, max(self._stencil_step_fraction, max_step))
-                if surrogate.accepted and surrogate.point is not None:
-                    _value, added, improved = self._evaluate_point(surrogate.point, source="exploit_surrogate")
-                    if added:
-                        source_counts["exploit_surrogate"] += 1
-                        if improved:
-                            improvements += 1
-                            source_improvements["exploit_surrogate"] += 1
-                            improved_this_round = True
-                    if len(self.archive) - before >= max_new or self._remaining() <= 0:
-                        break
-            stencil_candidates = [(point, "exploit_stencil") for point in self._stencil_points(self.best_point, step)]
-            for point, source in stencil_candidates:
-                if len(self.archive) - before >= max_new or self._remaining() <= 0:
-                    break
-                previous_best = self.best_point.copy()
-                _value, added, improved = self._evaluate_point(point, source=source)
-                if not added:
-                    continue
-                source_counts[source] += 1
-                if improved:
-                    improvements += 1
-                    source_improvements[source] += 1
-                    improved_this_round = True
-                    pattern_step = self.best_point - previous_best
-                    for multiplier in (1.0, 2.0, 3.0):
-                        if len(self.archive) - before >= max_new or self._remaining() <= 0:
-                            break
-                        pattern_point = self._clip_point(self.best_point + multiplier * pattern_step)
-                        _pattern_value, pattern_added, pattern_improved = self._evaluate_point(
-                            pattern_point,
-                            source="exploit_pattern",
-                        )
-                        if not pattern_added:
-                            break
-                        source_counts["exploit_pattern"] += 1
-                        if pattern_improved:
-                            improvements += 1
-                            source_improvements["exploit_pattern"] += 1
-                            improved_this_round = True
-                            pattern_step = self._last_successful_step.copy()
-                        else:
-                            break
-            if improved_this_round:
-                self._stencil_step_fraction = min(max_step, self._stencil_step_fraction * 1.25)
-            else:
-                self._stencil_step_fraction = max(min_step, self._stencil_step_fraction * 0.5)
-            if self._stencil_step_fraction <= min_step and not improved_this_round:
-                break
-        after = len(self.archive)
-        if after == before:
-            return None
-        return PointCloudBatchEvent(
-            batch_index=self._batch_index,
-            kind="stencil_refinement",
-            evaluations_before=before,
-            evaluations_after=after,
-            candidate_count=after - before,
-            source_counts=dict(source_counts),
-            best_before=best_before,
-            best_after=float(self.best_value),
-            best_point=self.best_point.copy(),
-            improved=self._is_better(self.best_value, best_before),
-            diagnostics={
-                "improvements": int(improvements),
-                "source_improvements": dict(source_improvements),
-                "stencil_step_fraction": float(self._stencil_step_fraction),
-                "rotated_stencil_improvements": int(source_improvements.get("exploit_rotated_stencil", 0)),
-                "pattern_improvements": int(source_improvements.get("exploit_pattern", 0)),
-                "surrogate_improvements": int(source_improvements.get("exploit_surrogate", 0)),
                 "archive_size": int(after),
             },
         )
@@ -3564,6 +3353,8 @@ class PointCloudSmoothLifeSearch:
                 ),
                 "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
                 "active_set_size": int(self._active_set_axes().size) if self._cooperative_refinement_active() else 0,
+                "projection_frame_count": int(self._last_projection_frame_count),
+                "surrogate_reliability": float(self._last_surrogate_reliability),
             },
         )
         self.snapshots.append(snapshot)
@@ -3599,58 +3390,38 @@ class PointCloudSmoothLifeSearch:
             self._refresh_views()
             self._update_portfolio()
             self._update_linkage_scores()
-            pre_stencil_refinement = None
-            if not self.config.local_refinement_enabled and self.config.early_stop_enabled:
-                pre_stencil_refinement = self._run_stencil_refinement()
-                if pre_stencil_refinement is not None:
-                    self.batch_events.append(pre_stencil_refinement)
-                    self._update_portfolio()
-                    self._capture_snapshot(force=True)
-                    if self._early_stop_reached():
-                        self._stop_reason = "early_stop_value"
-                        break
             candidates = self._candidate_batch(min(int(self._effective_batch_size()), self._remaining()))
             event = self._evaluate_candidates(candidates)
             self.batch_events.append(event)
             self._update_portfolio()
             candidate_points = np.asarray([point for point, _source in candidates], dtype=float) if candidates else None
             self._capture_snapshot(candidate_points=candidate_points)
-            cooperative_refinement = self._run_cooperative_refinement()
-            if cooperative_refinement is not None:
-                self.batch_events.append(cooperative_refinement)
-                self._update_portfolio()
-                self._capture_snapshot(force=True)
-            refinement = None
-            if event.improved or not self._local_refinement_stalled:
-                refinement = self._run_local_refinement()
-            if refinement is not None:
-                self.batch_events.append(refinement)
-                self._update_portfolio()
-                self._capture_snapshot(force=True)
-            direction_refinement = self._run_direction_refinement()
-            if direction_refinement is not None:
-                self.batch_events.append(direction_refinement)
-                self._update_portfolio()
-                self._capture_snapshot(force=True)
-            stencil_refinement = None
-            finite_difference_suppressed = (
-                self.config.local_refinement_enabled
-                and self.dimension >= int(self.config.high_dimensional_min_dimension)
-                and not self._high_dimensional_refinement_active()
+            polishing = None
+            prefer_cooperative = bool(
+                self._cooperative_refinement_due()
+                and (
+                    self._local_refinement_stalled
+                    or (len(self._successful_directions) >= 2 and self._batch_index % 3 == 0)
+                )
             )
-            if (not self.config.local_refinement_enabled or finite_difference_suppressed) and pre_stencil_refinement is None:
-                stencil_refinement = self._run_stencil_refinement()
-            if stencil_refinement is not None:
-                self.batch_events.append(stencil_refinement)
+            if prefer_cooperative:
+                polishing = self._run_cooperative_refinement()
+            if polishing is None and (event.improved or not self._local_refinement_stalled):
+                local_before = len(self.archive)
+                polishing = self._run_local_refinement()
+                if polishing is None and len(self.archive) == local_before:
+                    self._local_refinement_stalled = True
+            if polishing is None and not prefer_cooperative and self._cooperative_refinement_due():
+                polishing = self._run_cooperative_refinement()
+            if polishing is None:
+                polishing = self._run_direction_refinement()
+            if polishing is not None:
+                self.batch_events.append(polishing)
                 self._update_portfolio()
                 self._capture_snapshot(force=True)
             if (
                 event.evaluations_after == event.evaluations_before
-                and cooperative_refinement is None
-                and refinement is None
-                and direction_refinement is None
-                and stencil_refinement is None
-                and pre_stencil_refinement is None
+                and polishing is None
             ):
                 self._stop_reason = "no_progress"
                 break
@@ -3678,21 +3449,16 @@ class PointCloudSmoothLifeSearch:
                     "local_refinement_method": self.config.local_refinement_method,
                     "high_dimensional_refinement_enabled": bool(self.config.high_dimensional_refinement_enabled),
                     "dimension_scaled_batches_enabled": bool(self.config.dimension_scaled_batches_enabled),
-                    "source_adaptation_enabled": bool(self.config.source_adaptation_enabled),
                     "coherent_probes_enabled": bool(self.config.coherent_probes_enabled),
-                    "shade_enabled": bool(self.config.shade_enabled),
-                    "cma_region_enabled": bool(self.config.cma_region_enabled),
-                    "restart_strategy_enabled": bool(self.config.restart_strategy_enabled),
-                    "evolutionary_population_size": (
-                        None
-                        if self.config.evolutionary_population_size is None
-                        else int(self.config.evolutionary_population_size)
-                    ),
-                    "evolutionary_population_max": int(self.config.evolutionary_population_max),
-                    "relative_success_credit": float(self.config.relative_success_credit),
+                    "projection_ensemble_enabled": bool(self.config.projection_ensemble_enabled),
+                    "projection_ensemble_size": int(self.config.projection_ensemble_size),
+                    "projection_ensemble_refresh_batches": int(self.config.projection_ensemble_refresh_batches),
                     "surrogate_ranking_enabled": bool(self.config.surrogate_ranking_enabled),
                     "candidate_pool_multiplier": int(self.config.candidate_pool_multiplier),
                     "surrogate_ranking_neighbor_count": int(self.config.surrogate_ranking_neighbor_count),
+                    "surrogate_reliability_enabled": bool(self.config.surrogate_reliability_enabled),
+                    "surrogate_rank_weight_min": float(self.config.surrogate_rank_weight_min),
+                    "surrogate_rank_weight_max": float(self.config.surrogate_rank_weight_max),
                     "probe_recenter_enabled": bool(self.config.probe_recenter_enabled),
                     "probe_recenter_max_restarts": int(self.config.probe_recenter_max_restarts),
                     "basin_polishing_enabled": bool(self.config.basin_polishing_enabled),
@@ -3701,6 +3467,9 @@ class PointCloudSmoothLifeSearch:
                     "successful_direction_memory_size": int(self.config.successful_direction_memory_size),
                     "direction_refinement_enabled": bool(self.config.direction_refinement_enabled),
                     "direction_refinement_max_evaluations": int(self.config.direction_refinement_max_evaluations),
+                    "direction_line_search_mode": self.config.direction_line_search_mode,
+                    "direction_line_search_max_steps": int(self.config.direction_line_search_max_steps),
+                    "direction_line_search_min_step_fraction": float(self.config.direction_line_search_min_step_fraction),
                     "linkage_blocks_enabled": bool(self.config.linkage_blocks_enabled),
                     "linkage_update_interval_batches": int(self.config.linkage_update_interval_batches),
                     "linkage_neighbor_count": int(self.config.linkage_neighbor_count),
@@ -3712,6 +3481,9 @@ class PointCloudSmoothLifeSearch:
                         None if self.config.cooperative_group_size is None else int(self.config.cooperative_group_size)
                     ),
                     "cooperative_groups_per_batch": int(self.config.cooperative_groups_per_batch),
+                    "cooperative_frontier_enabled": bool(self.config.cooperative_frontier_enabled),
+                    "cooperative_frontier_fraction": float(self.config.cooperative_frontier_fraction),
+                    "axis_coverage_pressure": float(self.config.axis_coverage_pressure),
                     "active_set_max_fraction": float(self.config.active_set_max_fraction),
                     "active_set_expand_interval_batches": int(self.config.active_set_expand_interval_batches),
                     "early_stop_enabled": bool(self.config.early_stop_enabled),
@@ -3727,23 +3499,21 @@ class PointCloudSmoothLifeSearch:
                 "region_events": [event.to_dict() for event in self.region_events],
                 "trust_region_events": list(self.trust_region_events),
                 "source_stats": self._source_stats_payload(),
-                "shade_memory": {
-                    "f": self._shade_f_memory.astype(float).tolist(),
-                    "cr": self._shade_cr_memory.astype(float).tolist(),
-                    "index": int(self._shade_memory_index),
-                },
-                "cma_region_states": self._cma_states_payload(),
                 "anchor_baseline_target": (
                     None if self._anchor_baseline_target is None else float(self._anchor_baseline_target)
                 ),
                 "basin_polishing_active": bool(self._basin_polishing_active()),
                 "successful_direction_memory_size": int(len(self._successful_directions)),
+                "projection_frame_count": int(self._last_projection_frame_count),
+                "surrogate_reliability": float(self._last_surrogate_reliability),
+                "surrogate_rank_weight": float(self._last_surrogate_rank_weight),
                 "probe_recenters": int(self._probe_recenters_total),
                 "linkage_score_max": float(np.max(self._linkage_scores)) if self._linkage_scores.size else 0.0,
                 "lbfgs_pairs": int(len(self._lbfgs_pairs)),
                 "cooperative_refinement_active": bool(self._cooperative_refinement_active()),
                 "active_set_size": int(self._active_set_axes().size) if self._cooperative_refinement_active() else 0,
                 "active_set_expansions": int(self._active_set_expansions),
+                "last_cooperative_improved_axes": [int(axis) for axis in self._last_cooperative_improved_axes],
                 "axis_coverage_max": float(np.max(self._axis_coverage)) if self._axis_coverage.size else 0.0,
                 "stop_reason": self._stop_reason,
                 "local_refinement_stalled": bool(self._local_refinement_stalled),

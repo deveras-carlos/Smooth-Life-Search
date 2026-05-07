@@ -79,20 +79,26 @@ def _transformed_objective(
     return objective
 
 
-def primary_cases() -> list[AblationCase]:
+def primary_cases(
+    *,
+    dimensions: Sequence[int] = (30, 50, 100, 500),
+    seeds: Sequence[int] = (3, 7, 11),
+    budget: int = 6400,
+) -> list[AblationCase]:
     """Rosenbrock large-D cases that motivated the ablation pass."""
 
     return [
         AblationCase(
-            name=f"rosenbrock_{dimension}d_seed7",
+            name=f"rosenbrock_{dimension}d_seed{seed}",
             objective=rosenbrock,
             dimension=dimension,
-            seed=7,
-            budget=6400,
+            seed=seed,
+            budget=budget,
             bounds=tuple([(-10.0, 10.0)] * dimension),
             group="primary",
         )
-        for dimension in (30, 50, 100, 500)
+        for dimension in dimensions
+        for seed in seeds
     ]
 
 
@@ -170,16 +176,61 @@ def stress_cases() -> list[AblationCase]:
     ]
 
 
-def all_cases(case_set: str = "all") -> list[AblationCase]:
+def all_cases(
+    case_set: str = "all",
+    *,
+    dimensions: Sequence[int] | None = None,
+    seeds: Sequence[int] | None = None,
+    budget: int | None = None,
+) -> list[AblationCase]:
+    primary_dimensions = (30, 50, 100, 500) if dimensions is None else tuple(int(dimension) for dimension in dimensions)
+    primary_seeds = (3, 7, 11) if seeds is None else tuple(int(seed) for seed in seeds)
+    primary_budget = 6400 if budget is None else int(budget)
     if case_set == "primary":
-        return primary_cases()
+        return primary_cases(dimensions=primary_dimensions, seeds=primary_seeds, budget=primary_budget)
     if case_set == "guardrails":
-        return [*transformed_guardrail_cases(), *stress_cases()]
+        cases = [*transformed_guardrail_cases(), *stress_cases()]
+        return _filter_cases(cases, dimensions=dimensions, seeds=seeds, budget=budget)
     if case_set == "stress":
-        return stress_cases()
+        return _filter_cases(stress_cases(), dimensions=dimensions, seeds=seeds, budget=budget)
     if case_set == "all":
-        return [*primary_cases(), *transformed_guardrail_cases(), *stress_cases()]
+        cases = [
+            *primary_cases(dimensions=primary_dimensions, seeds=primary_seeds, budget=primary_budget),
+            *transformed_guardrail_cases(),
+            *stress_cases(),
+        ]
+        return _filter_cases(cases, dimensions=dimensions, seeds=seeds, budget=budget, preserve_primary=True)
     raise ValueError(f"unknown case set: {case_set}")
+
+
+def _filter_cases(
+    cases: Sequence[AblationCase],
+    *,
+    dimensions: Sequence[int] | None,
+    seeds: Sequence[int] | None,
+    budget: int | None,
+    preserve_primary: bool = False,
+) -> list[AblationCase]:
+    dimension_filter = None if dimensions is None else {int(dimension) for dimension in dimensions}
+    seed_filter = None if seeds is None else {int(seed) for seed in seeds}
+    filtered: list[AblationCase] = []
+    for case in cases:
+        if dimension_filter is not None and int(case.dimension) not in dimension_filter:
+            continue
+        if seed_filter is not None and int(case.seed) not in seed_filter:
+            continue
+        if budget is not None and (not preserve_primary or case.group != "primary"):
+            case = AblationCase(
+                name=f"{case.name}_budget{int(budget)}",
+                objective=case.objective,
+                dimension=case.dimension,
+                seed=case.seed,
+                budget=int(budget),
+                bounds=case.bounds,
+                group=case.group,
+            )
+        filtered.append(case)
+    return filtered
 
 
 def default_variants() -> list[AblationVariant]:
@@ -187,33 +238,39 @@ def default_variants() -> list[AblationVariant]:
 
     return [
         AblationVariant("default", {}),
+        AblationVariant("no_projection_ensemble", {"projection_ensemble_enabled": False}),
         AblationVariant("no_cooperative_refinement", {"cooperative_refinement_enabled": False}),
+        AblationVariant("no_cooperative_frontier", {"cooperative_frontier_enabled": False}),
         AblationVariant("no_coherent_probes", {"coherent_probes_enabled": False}),
         AblationVariant("no_direction_refinement", {"direction_refinement_enabled": False}),
-        AblationVariant("no_shade", {"shade_enabled": False}),
-        AblationVariant("no_cma_region", {"cma_region_enabled": False}),
+        AblationVariant("opportunistic_direction_search", {"direction_line_search_mode": "opportunistic"}),
         AblationVariant("no_surrogate_ranking", {"surrogate_ranking_enabled": False}),
-        AblationVariant("no_restart_strategy", {"restart_strategy_enabled": False}),
+        AblationVariant("no_surrogate_reliability", {"surrogate_reliability_enabled": False}),
         AblationVariant("no_local_refinement", {"local_refinement_enabled": False}),
+        AblationVariant("no_basin_polishing", {"basin_polishing_enabled": False}),
+        AblationVariant("no_trust_regions", {"trust_regions_enabled": False}),
         AblationVariant(
-            "evolution_only",
+            "global_density_only",
             {
                 "local_refinement_enabled": False,
                 "direction_refinement_enabled": False,
                 "cooperative_refinement_enabled": False,
                 "basin_polishing_enabled": False,
+                "coherent_probes_enabled": False,
+                "projection_ensemble_enabled": False,
+                "trust_regions_enabled": False,
                 "linkage_blocks_enabled": False,
                 "cross_block_lbfgs_enabled": False,
+                "cooperative_frontier_enabled": False,
             },
         ),
         AblationVariant(
             "polishing_only",
             {
-                "source_adaptation_enabled": False,
-                "coherent_probes_enabled": False,
-                "shade_enabled": False,
-                "cma_region_enabled": False,
-                "restart_strategy_enabled": False,
+                "global_candidate_fraction": 0.0,
+                "density_candidate_fraction": 0.0,
+                "coherent_probes_enabled": True,
+                "trust_regions_enabled": True,
                 "surrogate_ranking_enabled": False,
             },
         ),
@@ -232,6 +289,13 @@ def select_variants(names: str | Sequence[str] = "all") -> list[AblationVariant]
     return [by_name[name] for name in requested]
 
 
+def parse_int_list(raw: str | None) -> tuple[int, ...] | None:
+    if raw is None or raw.strip() == "":
+        return None
+    values = tuple(int(part.strip()) for part in raw.split(",") if part.strip())
+    return values or None
+
+
 def _source_counts_from_events(events: Iterable[Mapping[str, object]]) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for event in events:
@@ -247,6 +311,14 @@ def _source_improvements_from_stats(stats: Mapping[str, object]) -> dict[str, in
         if isinstance(payload, Mapping):
             improvements[str(source)] = int(payload.get("improvements", 0))
     return dict(sorted(improvements.items()))
+
+
+def _source_metric_from_stats(stats: Mapping[str, object], metric: str) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for source, payload in stats.items():
+        if isinstance(payload, Mapping):
+            values[str(source)] = float(payload.get(metric, 0.0))
+    return dict(sorted(values.items()))
 
 
 def run_case_variant(case: AblationCase, variant: AblationVariant) -> dict[str, object]:
@@ -295,18 +367,37 @@ def run_case_variant(case: AblationCase, variant: AblationVariant) -> dict[str, 
         ),
         "source_counts": _source_counts_from_events(batch_events if isinstance(batch_events, Sequence) else []),
         "source_improvements": _source_improvements_from_stats(source_stats if isinstance(source_stats, Mapping) else {}),
-        "exact_diagonal_scout": bool(
-            best_sample.source == "restart:scout"
-            and abs(float(best_sample.value)) <= 1e-14
-            and np.allclose(best_sample.point, np.ones(case.dimension))
+        "source_improvement_rate": _source_metric_from_stats(
+            source_stats if isinstance(source_stats, Mapping) else {},
+            "improvement_rate",
+        ),
+        "removed_source_hit": bool(
+            best_sample.source == "shade"
+            or best_sample.source == "restart:scout"
+            or ":cma" in best_sample.source
         ),
     }
 
 
-def run_matrix(cases: Sequence[AblationCase], variants: Sequence[AblationVariant]) -> list[dict[str, object]]:
+def run_matrix(
+    cases: Sequence[AblationCase],
+    variants: Sequence[AblationVariant],
+    *,
+    progress: bool = False,
+    progress_stream=sys.stderr,
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
+    total = max(len(cases) * len(variants), 1)
+    index = 0
     for case in cases:
         for variant in variants:
+            index += 1
+            if progress:
+                print(
+                    f"[{index}/{total}] {case.name} :: {variant.name}",
+                    file=progress_stream,
+                    flush=True,
+                )
             records.append(run_case_variant(case, variant))
     default_values = {
         (record["case"], record["seed"]): float(record["best_value"])
@@ -342,6 +433,17 @@ def _top_improvements(record: Mapping[str, object], limit: int = 3) -> str:
     return ", ".join(f"{source}:{count}" for source, count in ranked[:limit])
 
 
+def _top_float_metric(record: Mapping[str, object], field: str, limit: int = 3) -> str:
+    values = record.get(field, {})
+    if not isinstance(values, Mapping):
+        return ""
+    ranked = sorted(
+        ((str(source), float(value)) for source, value in values.items() if float(value) > 0.0),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return ", ".join(f"{source}:{value:.3f}" for source, value in ranked[:limit])
+
+
 def format_markdown(records: Sequence[Mapping[str, object]]) -> str:
     lines = [
         "# Point-Cloud Ablation Report",
@@ -350,14 +452,14 @@ def format_markdown(records: Sequence[Mapping[str, object]]) -> str:
         "",
         "## Primary Rosenbrock Cases",
         "",
-        "| case | variant | best value | delta vs default | ratio | evals | best source | active regions | coop active | improvements |",
-        "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- |",
+        "| case | variant | best value | delta vs default | ratio | evals | best source | active regions | coop active | improvement rates | improvements |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- |",
     ]
     for record in records:
         if record.get("group") != "primary":
             continue
         lines.append(
-            "| {case} | {variant} | {best} | {delta} | {ratio} | {evals} | {source} | {regions} | {coop} | {improvements} |".format(
+            "| {case} | {variant} | {best} | {delta} | {ratio} | {evals} | {source} | {regions} | {coop} | {rates} | {improvements} |".format(
                 case=record["case"],
                 variant=record["variant"],
                 best=_format_float(record["best_value"]),
@@ -367,6 +469,7 @@ def format_markdown(records: Sequence[Mapping[str, object]]) -> str:
                 source=record["best_source"],
                 regions=int(record["active_regions"]),
                 coop="yes" if bool(record["cooperative_refinement_active"]) else "no",
+                rates=_top_float_metric(record, "source_improvement_rate"),
                 improvements=_top_improvements(record),
             )
         )
@@ -378,7 +481,7 @@ def format_markdown(records: Sequence[Mapping[str, object]]) -> str:
                 "",
                 "## Guardrail Summary",
                 "",
-                "| group | variant | cases | median ratio vs default | exact diagonal scout hits |",
+                "| group | variant | cases | median ratio vs default | removed source hits |",
                 "| --- | --- | ---: | ---: | ---: |",
             ]
         )
@@ -403,9 +506,9 @@ def format_markdown(records: Sequence[Mapping[str, object]]) -> str:
                     dtype=float,
                 )
                 median_ratio = "n/a" if ratios.size == 0 else f"{float(np.median(ratios)):.3f}"
-                scout_hits = sum(1 for record in subset if bool(record.get("exact_diagonal_scout")))
+                source_hits = sum(1 for record in subset if bool(record.get("removed_source_hit")))
                 lines.append(
-                    f"| {group} | {variant} | {len(subset)} | {median_ratio} | {scout_hits} |"
+                    f"| {group} | {variant} | {len(subset)} | {median_ratio} | {source_hits} |"
                 )
 
     lines.extend(
@@ -415,7 +518,7 @@ def format_markdown(records: Sequence[Mapping[str, object]]) -> str:
             "",
             "- `delta vs default` is positive when the ablated run is worse than the default for the same case and seed.",
             "- Symmetric origin-anchor cases are guardrails only; exact zero there confirms anchor behavior, not search quality.",
-            "- `exact diagonal scout hits` must stay zero for high-D Rosenbrock-style shortcut protection.",
+            "- `removed source hits` must stay zero after the SHADE/CMA/restart cleanup.",
             "",
         ]
     )
@@ -442,9 +545,10 @@ def format_csv(records: Sequence[Mapping[str, object]]) -> str:
         "cooperative_refinement_active",
         "active_set_size",
         "cooperative_improvements",
-        "exact_diagonal_scout",
+        "removed_source_hit",
         "source_counts",
         "source_improvements",
+        "source_improvement_rate",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
@@ -452,6 +556,7 @@ def format_csv(records: Sequence[Mapping[str, object]]) -> str:
         row = {key: record.get(key) for key in fieldnames}
         row["source_counts"] = json.dumps(record.get("source_counts", {}), sort_keys=True)
         row["source_improvements"] = json.dumps(record.get("source_improvements", {}), sort_keys=True)
+        row["source_improvement_rate"] = json.dumps(record.get("source_improvement_rate", {}), sort_keys=True)
         writer.writerow(row)
     return output.getvalue()
 
@@ -482,6 +587,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated variant names, or 'all'.",
     )
     parser.add_argument(
+        "--dimensions",
+        default=None,
+        help="Comma-separated dimensions to include, for example '100,500'.",
+    )
+    parser.add_argument(
+        "--seeds",
+        default=None,
+        help="Comma-separated seeds to include; primary defaults to 3,7,11.",
+    )
+    parser.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        help="Override budget for selected cases.",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print case/variant progress to stderr during long matrices.",
+    )
+    parser.add_argument(
         "--format",
         choices=("markdown", "json", "jsonl", "csv"),
         default="markdown",
@@ -493,7 +619,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    records = run_matrix(all_cases(args.case_set), select_variants(args.variants))
+    records = run_matrix(
+        all_cases(
+            args.case_set,
+            dimensions=parse_int_list(args.dimensions),
+            seeds=parse_int_list(args.seeds),
+            budget=args.budget,
+        ),
+        select_variants(args.variants),
+        progress=bool(args.progress),
+    )
     payload = format_records(records, args.format)
     if args.output is None:
         sys.stdout.write(payload)

@@ -122,6 +122,21 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             "surrogate_full_quadratic_max_dimension",
             cloud_defaults.surrogate_full_quadratic_max_dimension,
         ),
+        projection_ensemble_enabled=getattr(
+            args,
+            "projection_ensemble_enabled",
+            cloud_defaults.projection_ensemble_enabled,
+        ),
+        projection_ensemble_size=getattr(
+            args,
+            "projection_ensemble_size",
+            cloud_defaults.projection_ensemble_size,
+        ),
+        projection_ensemble_refresh_batches=getattr(
+            args,
+            "projection_ensemble_refresh_batches",
+            cloud_defaults.projection_ensemble_refresh_batches,
+        ),
         local_refinement_enabled=getattr(args, "local_refinement_enabled", cloud_defaults.local_refinement_enabled),
         local_refinement_start_evaluations=getattr(
             args,
@@ -166,57 +181,10 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             "dimension_scaled_batch_max",
             cloud_defaults.dimension_scaled_batch_max,
         ),
-        source_adaptation_enabled=getattr(
-            args,
-            "source_adaptation_enabled",
-            cloud_defaults.source_adaptation_enabled,
-        ),
-        source_credit_temperature=getattr(
-            args,
-            "source_credit_temperature",
-            cloud_defaults.source_credit_temperature,
-        ),
-        source_exploration_floor=getattr(
-            args,
-            "source_exploration_floor",
-            cloud_defaults.source_exploration_floor,
-        ),
         coherent_probes_enabled=getattr(
             args,
             "coherent_probes_enabled",
             cloud_defaults.coherent_probes_enabled,
-        ),
-        shade_enabled=getattr(args, "shade_enabled", cloud_defaults.shade_enabled),
-        shade_memory_size=getattr(args, "shade_memory_size", cloud_defaults.shade_memory_size),
-        shade_pbest_fraction=getattr(args, "shade_pbest_fraction", cloud_defaults.shade_pbest_fraction),
-        shade_archive_fraction=getattr(args, "shade_archive_fraction", cloud_defaults.shade_archive_fraction),
-        cma_region_enabled=getattr(args, "cma_region_enabled", cloud_defaults.cma_region_enabled),
-        cma_direction_memory_size=getattr(
-            args,
-            "cma_direction_memory_size",
-            cloud_defaults.cma_direction_memory_size,
-        ),
-        cma_sigma_init=getattr(args, "cma_sigma_init", cloud_defaults.cma_sigma_init),
-        restart_strategy_enabled=getattr(
-            args,
-            "restart_strategy_enabled",
-            cloud_defaults.restart_strategy_enabled,
-        ),
-        restart_stall_batches=getattr(args, "restart_stall_batches", cloud_defaults.restart_stall_batches),
-        evolutionary_population_size=getattr(
-            args,
-            "evolutionary_population_size",
-            cloud_defaults.evolutionary_population_size,
-        ),
-        evolutionary_population_max=getattr(
-            args,
-            "evolutionary_population_max",
-            cloud_defaults.evolutionary_population_max,
-        ),
-        relative_success_credit=getattr(
-            args,
-            "relative_success_credit",
-            cloud_defaults.relative_success_credit,
         ),
         surrogate_ranking_enabled=getattr(
             args,
@@ -273,6 +241,21 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             "direction_refinement_max_evaluations",
             cloud_defaults.direction_refinement_max_evaluations,
         ),
+        direction_line_search_mode=getattr(
+            args,
+            "direction_line_search_mode",
+            cloud_defaults.direction_line_search_mode,
+        ),
+        direction_line_search_max_steps=getattr(
+            args,
+            "direction_line_search_max_steps",
+            cloud_defaults.direction_line_search_max_steps,
+        ),
+        direction_line_search_min_step_fraction=getattr(
+            args,
+            "direction_line_search_min_step_fraction",
+            cloud_defaults.direction_line_search_min_step_fraction,
+        ),
         linkage_blocks_enabled=getattr(
             args,
             "linkage_blocks_enabled",
@@ -318,6 +301,21 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             "cooperative_groups_per_batch",
             cloud_defaults.cooperative_groups_per_batch,
         ),
+        cooperative_frontier_enabled=getattr(
+            args,
+            "cooperative_frontier_enabled",
+            cloud_defaults.cooperative_frontier_enabled,
+        ),
+        cooperative_frontier_fraction=getattr(
+            args,
+            "cooperative_frontier_fraction",
+            cloud_defaults.cooperative_frontier_fraction,
+        ),
+        axis_coverage_pressure=getattr(
+            args,
+            "axis_coverage_pressure",
+            cloud_defaults.axis_coverage_pressure,
+        ),
         active_set_max_fraction=getattr(
             args,
             "active_set_max_fraction",
@@ -332,6 +330,21 @@ def _build_configs(args: argparse.Namespace) -> tuple[list[tuple[float, float]],
             None
             if getattr(args, "projection_axes", cloud_defaults.projection_axes) is None
             else tuple(int(axis) for axis in getattr(args, "projection_axes"))
+        ),
+        surrogate_reliability_enabled=getattr(
+            args,
+            "surrogate_reliability_enabled",
+            cloud_defaults.surrogate_reliability_enabled,
+        ),
+        surrogate_rank_weight_min=getattr(
+            args,
+            "surrogate_rank_weight_min",
+            cloud_defaults.surrogate_rank_weight_min,
+        ),
+        surrogate_rank_weight_max=getattr(
+            args,
+            "surrogate_rank_weight_max",
+            cloud_defaults.surrogate_rank_weight_max,
         ),
         best_improvement_tolerance=args.best_improvement_tolerance,
     )
@@ -574,6 +587,9 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--surrogate-max-samples", type=int, default=cloud_defaults.surrogate_max_samples, help="Maximum samples for local quadratic fits.")
     cloud_shared.add_argument("--surrogate-full-quadratic-max-dimension", type=int, default=cloud_defaults.surrogate_full_quadratic_max_dimension, help="Maximum dimension using full quadratic surrogate fits.")
     cloud_shared.add_argument("--projection-axes", type=int, nargs=2, metavar=("I", "J"), default=cloud_defaults.projection_axes, help="Optional coordinate axes used for 2D density projections.")
+    cloud_shared.add_argument("--no-projection-ensemble", dest="projection_ensemble_enabled", action="store_false", default=cloud_defaults.projection_ensemble_enabled, help="Disable deterministic multi-projection SmoothLife density views.")
+    cloud_shared.add_argument("--projection-ensemble-size", type=int, default=cloud_defaults.projection_ensemble_size, help="Maximum 2D projection frames blended for density sampling.")
+    cloud_shared.add_argument("--projection-ensemble-refresh-batches", type=int, default=cloud_defaults.projection_ensemble_refresh_batches, help="Batches between projection-ensemble diagnostic refreshes.")
     cloud_shared.add_argument("--no-local-refinement", dest="local_refinement_enabled", action="store_false", default=cloud_defaults.local_refinement_enabled, help="Disable finite-difference local refinement probes.")
     cloud_shared.add_argument("--local-refinement-start-evaluations", type=int, default=cloud_defaults.local_refinement_start_evaluations, help="Archive size before local refinement can run.")
     cloud_shared.add_argument("--local-refinement-max-evaluations", type=int, default=cloud_defaults.local_refinement_max_evaluations, help="Maximum local-refinement evaluations per run.")
@@ -586,22 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--block-refinement-blocks-per-pass", type=int, default=cloud_defaults.block_refinement_blocks_per_pass, help="Number of high-dimensional refinement blocks tried per local pass.")
     cloud_shared.add_argument("--no-dimension-scaled-batches", dest="dimension_scaled_batches_enabled", action="store_false", default=cloud_defaults.dimension_scaled_batches_enabled, help="Disable dimension-scaled candidate batch sizing.")
     cloud_shared.add_argument("--dimension-scaled-batch-max", type=int, default=cloud_defaults.dimension_scaled_batch_max, help="Maximum effective batch size when dimension-scaled batches are active.")
-    cloud_shared.add_argument("--no-source-adaptation", dest="source_adaptation_enabled", action="store_false", default=cloud_defaults.source_adaptation_enabled, help="Disable adaptive source credit allocation for high-dimensional evolutionary proposals.")
-    cloud_shared.add_argument("--source-credit-temperature", type=float, default=cloud_defaults.source_credit_temperature, help="Softmax temperature for adaptive source credit allocation.")
-    cloud_shared.add_argument("--source-exploration-floor", type=float, default=cloud_defaults.source_exploration_floor, help="Minimum allocation probability for each enabled evolutionary source.")
     cloud_shared.add_argument("--no-coherent-probes", dest="coherent_probes_enabled", action="store_false", default=cloud_defaults.coherent_probes_enabled, help="Disable high-dimensional coherent coordinate probes.")
-    cloud_shared.add_argument("--no-shade", dest="shade_enabled", action="store_false", default=cloud_defaults.shade_enabled, help="Disable SHADE-style archive-difference proposals in high-dimensional runs.")
-    cloud_shared.add_argument("--shade-memory-size", type=int, default=cloud_defaults.shade_memory_size, help="Number of adaptive F/CR memory slots for SHADE proposals.")
-    cloud_shared.add_argument("--shade-pbest-fraction", type=float, default=cloud_defaults.shade_pbest_fraction, help="Elite archive fraction used for SHADE current-to-pbest proposals.")
-    cloud_shared.add_argument("--shade-archive-fraction", type=float, default=cloud_defaults.shade_archive_fraction, help="Archive fraction used as the SHADE difference pool.")
-    cloud_shared.add_argument("--no-cma-region", dest="cma_region_enabled", action="store_false", default=cloud_defaults.cma_region_enabled, help="Disable low-rank CMA-style region proposals in high-dimensional runs.")
-    cloud_shared.add_argument("--cma-direction-memory-size", type=int, default=cloud_defaults.cma_direction_memory_size, help="Successful direction memory size for low-rank CMA-style region proposals.")
-    cloud_shared.add_argument("--cma-sigma-init", type=float, default=cloud_defaults.cma_sigma_init, help="Initial normalized sigma for low-rank CMA-style region proposals.")
-    cloud_shared.add_argument("--no-restart-strategy", dest="restart_strategy_enabled", action="store_false", default=cloud_defaults.restart_strategy_enabled, help="Disable high-dimensional restart/scout proposals.")
-    cloud_shared.add_argument("--restart-stall-batches", type=int, default=cloud_defaults.restart_stall_batches, help="Stalled batches before restart pressure is considered active.")
-    cloud_shared.add_argument("--evolutionary-population-size", type=int, default=cloud_defaults.evolutionary_population_size, help="Optional live evolutionary population size.")
-    cloud_shared.add_argument("--evolutionary-population-max", type=int, default=cloud_defaults.evolutionary_population_max, help="Maximum derived live evolutionary population size.")
-    cloud_shared.add_argument("--relative-success-credit", type=float, default=cloud_defaults.relative_success_credit, help="Credit weight for parent-relative evolutionary improvements.")
     cloud_shared.add_argument("--no-surrogate-ranking", dest="surrogate_ranking_enabled", action="store_false", default=cloud_defaults.surrogate_ranking_enabled, help="Disable surrogate-ranked preselection for high-dimensional proposal pools.")
     cloud_shared.add_argument("--candidate-pool-multiplier", type=int, default=cloud_defaults.candidate_pool_multiplier, help="Proposal pool multiplier used before surrogate-ranked preselection.")
     cloud_shared.add_argument("--surrogate-ranking-neighbor-count", type=int, default=cloud_defaults.surrogate_ranking_neighbor_count, help="Nearest archive samples used for surrogate proposal ranking.")
@@ -613,6 +614,9 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--successful-direction-memory-size", type=int, default=cloud_defaults.successful_direction_memory_size, help="Recent successful normalized directions kept for polishing.")
     cloud_shared.add_argument("--no-direction-refinement", dest="direction_refinement_enabled", action="store_false", default=cloud_defaults.direction_refinement_enabled, help="Disable derivative-free successful-direction line-search polishing.")
     cloud_shared.add_argument("--direction-refinement-max-evaluations", type=int, default=cloud_defaults.direction_refinement_max_evaluations, help="Maximum evaluations spent by one direction-refinement pass.")
+    cloud_shared.add_argument("--direction-line-search-mode", choices=("opportunistic", "bracketed"), default=cloud_defaults.direction_line_search_mode, help="Derivative-free direction refinement line-search policy.")
+    cloud_shared.add_argument("--direction-line-search-max-steps", type=int, default=cloud_defaults.direction_line_search_max_steps, help="Maximum trial step scales per direction line-search side.")
+    cloud_shared.add_argument("--direction-line-search-min-step-fraction", type=float, default=cloud_defaults.direction_line_search_min_step_fraction, help="Smallest normalized step fraction used by direction line search.")
     cloud_shared.add_argument("--no-linkage-blocks", dest="linkage_blocks_enabled", action="store_false", default=cloud_defaults.linkage_blocks_enabled, help="Disable linkage-aware high-dimensional refinement blocks.")
     cloud_shared.add_argument("--linkage-update-interval-batches", type=int, default=cloud_defaults.linkage_update_interval_batches, help="Batches between archive-derived linkage score refreshes.")
     cloud_shared.add_argument("--linkage-neighbor-count", type=int, default=cloud_defaults.linkage_neighbor_count, help="Strong neighbors included in linkage-aware blocks.")
@@ -622,8 +626,14 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_shared.add_argument("--cooperative-min-dimension", type=int, default=cloud_defaults.cooperative_min_dimension, help="Dimension threshold where cooperative active-set refinement activates.")
     cloud_shared.add_argument("--cooperative-group-size", type=int, default=cloud_defaults.cooperative_group_size, help="Coordinate group size for cooperative refinement; defaults to active subspace size.")
     cloud_shared.add_argument("--cooperative-groups-per-batch", type=int, default=cloud_defaults.cooperative_groups_per_batch, help="Cooperative coordinate groups attempted per batch.")
+    cloud_shared.add_argument("--no-cooperative-frontier", dest="cooperative_frontier_enabled", action="store_false", default=cloud_defaults.cooperative_frontier_enabled, help="Disable frontier-biased cooperative group scheduling.")
+    cloud_shared.add_argument("--cooperative-frontier-fraction", type=float, default=cloud_defaults.cooperative_frontier_fraction, help="Fraction of cooperative groups reserved for frontier propagation.")
+    cloud_shared.add_argument("--axis-coverage-pressure", type=float, default=cloud_defaults.axis_coverage_pressure, help="Weight assigned to under-covered axes in cooperative active-set scoring.")
     cloud_shared.add_argument("--active-set-max-fraction", type=float, default=cloud_defaults.active_set_max_fraction, help="Maximum fraction of axes kept in the large-D active set.")
     cloud_shared.add_argument("--active-set-expand-interval-batches", type=int, default=cloud_defaults.active_set_expand_interval_batches, help="Batches between active-set coverage expansion refreshes.")
+    cloud_shared.add_argument("--no-surrogate-reliability", dest="surrogate_reliability_enabled", action="store_false", default=cloud_defaults.surrogate_reliability_enabled, help="Disable reliability gating for surrogate-ranked proposal preselection.")
+    cloud_shared.add_argument("--surrogate-rank-weight-min", type=float, default=cloud_defaults.surrogate_rank_weight_min, help="Minimum prediction weight when surrogate ranking reliability is poor.")
+    cloud_shared.add_argument("--surrogate-rank-weight-max", type=float, default=cloud_defaults.surrogate_rank_weight_max, help="Maximum prediction weight when surrogate ranking reliability is strong.")
 
     point_cloud = subparsers.add_parser("point-cloud", parents=[shared, cloud_shared], help="Run point-cloud SmoothLife optimization.")
     point_cloud.add_argument("--show-batches", action="store_true", help="Print per-batch details.")
@@ -663,20 +673,14 @@ def main(argv: list[str] | None = None) -> int:
             explicit_dests.add("local_refinement_enabled")
         if "no_anisotropic_regions" in explicit_dests:
             explicit_dests.add("anisotropic_regions_enabled")
+        if "no_projection_ensemble" in explicit_dests:
+            explicit_dests.add("projection_ensemble_enabled")
         if "no_high_dimensional_refinement" in explicit_dests:
             explicit_dests.add("high_dimensional_refinement_enabled")
         if "no_dimension_scaled_batches" in explicit_dests:
             explicit_dests.add("dimension_scaled_batches_enabled")
-        if "no_source_adaptation" in explicit_dests:
-            explicit_dests.add("source_adaptation_enabled")
         if "no_coherent_probes" in explicit_dests:
             explicit_dests.add("coherent_probes_enabled")
-        if "no_shade" in explicit_dests:
-            explicit_dests.add("shade_enabled")
-        if "no_cma_region" in explicit_dests:
-            explicit_dests.add("cma_region_enabled")
-        if "no_restart_strategy" in explicit_dests:
-            explicit_dests.add("restart_strategy_enabled")
         if "no_surrogate_ranking" in explicit_dests:
             explicit_dests.add("surrogate_ranking_enabled")
         if "no_probe_recenter" in explicit_dests:
@@ -685,12 +689,16 @@ def main(argv: list[str] | None = None) -> int:
             explicit_dests.add("basin_polishing_enabled")
         if "no_direction_refinement" in explicit_dests:
             explicit_dests.add("direction_refinement_enabled")
+        if "no_surrogate_reliability" in explicit_dests:
+            explicit_dests.add("surrogate_reliability_enabled")
         if "no_linkage_blocks" in explicit_dests:
             explicit_dests.add("linkage_blocks_enabled")
         if "no_cross_block_lbfgs" in explicit_dests:
             explicit_dests.add("cross_block_lbfgs_enabled")
         if "no_cooperative_refinement" in explicit_dests:
             explicit_dests.add("cooperative_refinement_enabled")
+        if "no_cooperative_frontier" in explicit_dests:
+            explicit_dests.add("cooperative_frontier_enabled")
         if "early_stop_enabled" in explicit_dests:
             explicit_dests.add("early_stop_enabled")
         if "target_value" in explicit_dests:

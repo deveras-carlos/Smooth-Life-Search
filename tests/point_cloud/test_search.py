@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from collections import Counter
 
 import numpy as np
 
@@ -225,117 +224,94 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
                 )
                 self.assertEqual(search._effective_batch_size(), expected)
 
-    def test_source_credit_allocation_keeps_exploration_floor(self) -> None:
-        search = self._high_dimensional_search(dimension=30, seed=1)
-        search.config.source_exploration_floor = 0.05
-        search._record_source_results(
-            Counter({"shade": 20, "restart:scout": 20, "region:1:cma": 20}),
-            Counter({"shade": 20, "restart:scout": 20, "region:1:cma": 20}),
-            Counter({"shade": 5}),
-            Counter({"shade": 100.0}),
+    def test_cloud_only_direction_refinement_uses_compact_batch_floor(self) -> None:
+        search = PointCloudSmoothLifeSearch(
+            sphere,
+            [(-5.0, 5.0)] * 2,
+            SmoothLifeConfig(grid_shape=(32, 32), store_all_snapshots=False),
+            PointCloudSearchConfig(batch_size=32, local_refinement_enabled=False),
         )
 
-        counts = search._candidate_counts(100)
+        self.assertEqual(search._effective_batch_size(), 48)
 
-        self.assertGreaterEqual(counts["shade"], 5)
-        self.assertGreaterEqual(counts["restart"], 5)
-        self.assertGreaterEqual(counts["cma"], 5)
+    def test_deterministic_stage_allocator_emits_lean_sources(self) -> None:
+        search = self._high_dimensional_search(dimension=30, seed=1)
 
-    def test_shade_candidates_are_bounded_deterministic_and_update_memory(self) -> None:
+        exploration = search._candidate_counts(100)
+        repeated_exploration = search._candidate_counts(100)
+        search._anchor_baseline_target = 100.0
+        search.best_value = 10.0
+        polishing = search._candidate_counts(100)
+
+        self.assertEqual(set(exploration), {"global", "smoothlife_density", "region", "coherent"})
+        self.assertEqual(exploration, repeated_exploration)
+        self.assertGreater(polishing["exploit"], exploration.get("exploit", 0))
+        self.assertGreater(polishing["region"], 0)
+        self.assertGreater(polishing["coherent"], 0)
+        self.assertNotIn("shade", polishing)
+        self.assertNotIn("cma", polishing)
+        self.assertNotIn("restart", polishing)
+
+    def test_lean_source_stats_are_simple_evaluation_accounting(self) -> None:
+        search = self._high_dimensional_search(dimension=100, seed=2)
+        candidates = search._candidate_batch(24)
+        event = search._evaluate_candidates(candidates)
+
+        stats = search._source_stats_payload()
+
+        self.assertIn("source_stats", event.diagnostics)
+        self.assertTrue(stats)
+        for payload in stats.values():
+            self.assertIn("attempts", payload)
+            self.assertIn("evaluations", payload)
+            self.assertIn("improvements", payload)
+            self.assertIn("improvement_sum", payload)
+            self.assertIn("evaluation_share", payload)
+            self.assertNotIn("allocation_weight", payload)
+            self.assertNotIn("relative_wins", payload)
+
+    def test_high_dimensional_polishing_preserves_coherent_and_cooperative_floors(self) -> None:
+        search = self._high_dimensional_search(dimension=500, seed=2)
+        search._anchor_baseline_target = 500.0
+        search.best_value = 10.0
+
+        counts = search._candidate_counts(128)
+
+        self.assertGreaterEqual(counts["coherent"], 20)
+        self.assertGreaterEqual(counts["cooperative"], 16)
+        self.assertGreater(counts["coherent"], counts["global"])
+        self.assertGreater(counts["cooperative"], counts["global"])
+
+    def test_no_removed_evolutionary_sources_are_emitted(self) -> None:
         first = self._high_dimensional_search(dimension=30, seed=3)
         second = self._high_dimensional_search(dimension=30, seed=3)
 
-        first_candidates = first._shade_candidates(8)
-        second_candidates = second._shade_candidates(8)
-        first_points = np.asarray([point for point, _source in first_candidates], dtype=float)
-        second_points = np.asarray([point for point, _source in second_candidates], dtype=float)
+        first_candidates = first._candidate_batch(32)
+        second_candidates = second._candidate_batch(32)
+        first_points = np.asarray([candidate.point for candidate in first_candidates], dtype=float)
+        second_points = np.asarray([candidate.point for candidate in second_candidates], dtype=float)
+        sources = {candidate.source for candidate in first_candidates}
 
-        self.assertEqual({source for _point, source in first_candidates}, {"shade"})
         self.assertTrue(np.allclose(first_points, second_points))
         self.assertTrue(np.all(first_points >= -10.0))
         self.assertTrue(np.all(first_points <= 10.0))
         keys = {tuple(point) for point in first_points}
         self.assertEqual(len(keys), len(first_points))
-
-        before = first._shade_f_memory.copy()
-        first._update_shade_memory([(0.8, 0.3, 2.0)])
-
-        self.assertFalse(np.allclose(before, first._shade_f_memory))
+        self.assertFalse(any(source == "shade" or source == "restart:scout" or ":cma" in source for source in sources))
 
     def test_candidate_proposal_metadata_survives_generation_dedup_and_evaluation(self) -> None:
         search = self._high_dimensional_search(dimension=30, seed=4)
-        proposals = search._shade_candidates(12)
+        proposals = search._candidate_batch(12)
 
         self.assertTrue(all(isinstance(candidate, CandidateProposal) for candidate in proposals))
-        self.assertTrue(all(candidate.parent_key is not None for candidate in proposals))
-        self.assertTrue(all(candidate.shade_params is not None for candidate in proposals))
+        self.assertTrue(any(candidate.parent_key is not None for candidate in proposals))
 
-        ranked = search._rank_candidate_pool([*proposals, *proposals], 6, {"shade": 6})
+        ranked = search._rank_candidate_pool([*proposals, *proposals], 6, search._candidate_counts(6))
         event = search._evaluate_candidates(ranked)
 
         self.assertLessEqual(event.candidate_count, 6)
-        self.assertIn("source_relative_successes", event.diagnostics)
+        self.assertIn("source_stats", event.diagnostics)
         self.assertIn("surrogate_ranked_candidates", event.diagnostics)
-
-    def test_parent_relative_success_updates_shade_memory_without_global_best(self) -> None:
-        search = self._high_dimensional_search(dimension=30, seed=6)
-        parent = max(search.archive.samples, key=lambda sample: sample.value)
-        proposal = CandidateProposal(
-            point=0.75 * parent.point,
-            source="shade",
-            family="shade",
-            parent_key=search.archive.key(parent.point),
-            shade_params=(0.7, 0.4),
-        )
-        memory_index_before = search._shade_memory_index
-        best_before = float(search.best_value)
-
-        event = search._evaluate_candidates([proposal])
-
-        self.assertEqual(search.best_value, best_before)
-        self.assertEqual(event.diagnostics["source_relative_successes"]["shade"], 1)
-        self.assertGreater(search._shade_memory_index, memory_index_before)
-        self.assertGreater(search._source_stats["shade"].ema_credit, 0.0)
-
-    def test_cma_region_candidates_are_bounded_and_adapt_after_success(self) -> None:
-        search = self._high_dimensional_search(dimension=30, seed=5)
-        candidates = search._cma_region_candidates(10)
-        points = np.asarray([point for point, _source in candidates], dtype=float)
-
-        self.assertTrue(candidates)
-        self.assertTrue(all(":cma" in source for _point, source in candidates))
-        self.assertTrue(np.all(points >= -10.0))
-        self.assertTrue(np.all(points <= 10.0))
-
-        source = candidates[0][1]
-        region_id = int(source.split(":")[1])
-        state = search._cma_state_for_region(next(region for region in search.regions if region.region_id == region_id))
-        sigma_before = state.sigma
-        search._apply_cma_feedback(Counter({source: 1}), Counter({source: 1}), [(region_id, points[0], 1.0)])
-
-        self.assertGreaterEqual(search._cma_states[region_id].sigma, sigma_before)
-        self.assertGreater(len(search._cma_states[region_id].directions), 0)
-
-    def test_cma_region_state_updates_from_region_relative_success(self) -> None:
-        search = self._high_dimensional_search(dimension=30, seed=8)
-        region = search.regions[0]
-        parent = max(search.archive.samples, key=lambda sample: sample.value)
-        source = f"region:{region.region_id}:cma"
-        state = search._cma_state_for_region(region)
-        sigma_before = float(state.sigma)
-        proposal = CandidateProposal(
-            point=0.75 * parent.point,
-            source=source,
-            family="cma",
-            parent_key=search.archive.key(parent.point),
-            region_id=region.region_id,
-        )
-
-        event = search._evaluate_candidates([proposal])
-
-        self.assertEqual(event.diagnostics["source_relative_successes"][source], 1)
-        self.assertGreaterEqual(search._cma_states[region.region_id].sigma, sigma_before)
-        self.assertGreater(len(search._cma_states[region.region_id].directions), 0)
 
     def test_surrogate_preselection_is_deterministic_bounded_and_budget_exact(self) -> None:
         first = self._high_dimensional_search(dimension=30, seed=10)
@@ -355,17 +331,18 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
         self.assertTrue(any(candidate.predicted_score is not None for candidate in first_candidates))
         self.assertLessEqual(event.evaluations_after - before, 20)
 
-    def test_restart_scouts_emit_scrambled_bounded_candidates(self) -> None:
+    def test_cooperative_candidates_modify_only_selected_group_axes(self) -> None:
         search = self._high_dimensional_search(dimension=30, seed=7)
-        candidates = search._restart_candidates(4)
-        points = np.asarray([point for point, _source in candidates], dtype=float)
-        normalized = (points + 10.0) / 20.0
+        search.config.cooperative_min_dimension = 30
+        search.best_point = np.linspace(-2.0, 2.0, 30)
+        candidates = search._cooperative_candidates(12)
 
-        self.assertEqual({source for _point, source in candidates}, {"restart:scout"})
-        self.assertTrue(np.all(points >= -10.0))
-        self.assertTrue(np.all(points <= 10.0))
-        self.assertFalse(any(np.allclose(point, np.ones(30)) for point in points))
-        self.assertTrue(np.all(np.var(normalized, axis=1) > 1e-4))
+        self.assertTrue(candidates)
+        for candidate in candidates:
+            axes = set(candidate.axes or ())
+            changed = set(np.flatnonzero(np.abs(candidate.point - search.best_point) > 1e-12))
+            self.assertTrue(changed.issubset(axes))
+            self.assertIn(candidate.source, {"cooperative:group", "cooperative:line_search"})
 
     def test_coherent_candidates_are_bounded_jittered_and_parent_labeled(self) -> None:
         search = self._high_dimensional_search(dimension=30, seed=13)
@@ -390,12 +367,31 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
 
     def test_high_dimensional_ecology_density_view_is_finite_and_nonblank(self) -> None:
         search = self._high_dimensional_search(dimension=30, seed=9)
+        before = np.zeros(30, dtype=float)
+        after = np.zeros(30, dtype=float)
+        after[[5, 11]] = 1.0
+        search._record_successful_direction(before, after)
+        search._axis_coverage[:] = 4.0
+        search._axis_coverage[[17, 23]] = 0.0
         density, objective, evaluated = search._density_view()
+        candidates = search._density_candidates(12)
 
         self.assertTrue(np.all(np.isfinite(density)))
         self.assertTrue(np.all(np.isfinite(objective)))
         self.assertGreater(float(np.max(density)), 0.0)
         self.assertGreater(int(np.count_nonzero(evaluated)), 0)
+        self.assertGreaterEqual(search._last_projection_frame_count, 2)
+        self.assertEqual(len(candidates), 12)
+        self.assertTrue(all(candidate.source == "density" or candidate.source == "global" for candidate in candidates))
+        self.assertTrue(all(np.all(candidate.point >= -10.0) and np.all(candidate.point <= 10.0) for candidate in candidates))
+
+    def test_projection_ensemble_can_be_disabled(self) -> None:
+        search = self._high_dimensional_search(dimension=30, seed=9)
+        search.config.projection_ensemble_enabled = False
+        frames = search._density_projection_frames()
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][0], "coordinate")
 
     def test_probe_improvement_recenters_block_gradient(self) -> None:
         target = np.ones(12, dtype=float)
@@ -434,7 +430,7 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
 
         self.assertFalse(search._target(40.0) <= 0.25 * search._anchor_baseline_target)
         self.assertLess(active["global"], inactive["global"])
-        self.assertGreaterEqual(active["exploit"], inactive["exploit"])
+        self.assertGreaterEqual(active["exploit"], inactive.get("exploit", 0))
         self.assertTrue(search._basin_polishing_active())
 
     def test_successful_direction_memory_is_bounded_and_normalized(self) -> None:
@@ -475,8 +471,31 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
 
         self.assertIsNotNone(event)
         self.assertLess(search.best_value, before)
+        self.assertEqual(event.diagnostics["direction_line_search_mode"], "bracketed")
+        self.assertIn("direction_quadratic_steps", event.diagnostics)
         self.assertGreater(event.diagnostics["direction_line_search_improvements"], 0)
         self.assertIn("direction_line_search", event.source_counts)
+
+    def test_surrogate_reliability_gates_candidate_rank_weight(self) -> None:
+        search = self._high_dimensional_search(dimension=30, seed=27)
+        proposals = search._candidate_batch(20)
+
+        self.assertTrue(any(candidate.predicted_score is not None for candidate in proposals))
+        self.assertGreaterEqual(search._last_surrogate_reliability, 0.0)
+        self.assertLessEqual(search._last_surrogate_reliability, 1.0)
+        self.assertGreaterEqual(search._last_surrogate_rank_weight, search.config.surrogate_rank_weight_min)
+        self.assertLessEqual(search._last_surrogate_rank_weight, search.config.surrogate_rank_weight_max)
+
+    def test_cooperative_frontier_groups_follow_recent_improved_axes(self) -> None:
+        search = self._high_dimensional_search(dimension=120, seed=28)
+        search._last_cooperative_improved_axes = (40,)
+        search._axis_coverage[:] = 5.0
+        search._axis_coverage[[39, 41]] = 0.0
+
+        groups = search._cooperative_groups(4)
+
+        self.assertTrue(groups)
+        self.assertTrue(any(39 in group.tolist() or 41 in group.tolist() for group in groups))
 
     def test_linkage_scores_produce_coupled_blocks(self) -> None:
         search = self._high_dimensional_search(dimension=30, seed=18)
@@ -601,6 +620,10 @@ class TestPointCloudSmoothLifeSearch(unittest.TestCase):
     def test_disabling_cooperative_refinement_removes_large_d_allocation(self) -> None:
         enabled = self._high_dimensional_search(dimension=120, seed=26)
         disabled = self._high_dimensional_search(dimension=120, seed=26)
+        enabled._anchor_baseline_target = 100.0
+        enabled.best_value = 10.0
+        disabled._anchor_baseline_target = 100.0
+        disabled.best_value = 10.0
         disabled.config.cooperative_refinement_enabled = False
 
         enabled_counts = enabled._candidate_counts(100)

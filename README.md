@@ -3,7 +3,7 @@
 Smooth-Life-Search is a small Python package for 2D SmoothLife-inspired simulation and N-D archive-centered optimization.
 
 - `SmoothLifeSearch` is the literal dense SmoothLife-style simulator. It keeps field evolution, disk/ring neighborhoods, lazy objective evaluation, objective-aware transition dynamics, and optional guided objective support.
-- `PointCloudSmoothLifeSearch` is the optimizer. It keeps a persistent N-D archive of evaluated points, derives temporary 2D SmoothLife-style ecology projections from that archive or from local active subspaces, and proposes new candidates from global low-discrepancy samples, density samples, anisotropic adaptive trust regions, SHADE-style archive differences, low-rank CMA-style region samples, coherent coordinate probes, restart scouts, local quadratic surrogates, rotated/axis stencils, pattern probes, and incumbent-centered refinement probes.
+- `PointCloudSmoothLifeSearch` is the optimizer. It keeps a persistent N-D archive of evaluated points, derives a small deterministic ensemble of temporary 2D SmoothLife-style ecology projections from that archive or from local active subspaces, and proposes new candidates from global low-discrepancy samples, density samples, anisotropic adaptive trust regions, coherent coordinate probes, local quadratic surrogates, rotated/axis stencils, pattern probes, bracketed direction searches, and cooperative frontier coordinate groups.
 
 ## What It Implements
 
@@ -11,9 +11,9 @@ Smooth-Life-Search is a small Python package for 2D SmoothLife-inspired simulati
 - Objective-aware transition dynamics for dense SmoothLife simulation.
 - Archive-first N-D point-cloud optimization where every objective evaluation is stored once.
 - Adaptive proposal-region portfolios with radius expansion/shrink feedback, stall cooldown, archive-derived anisotropic geometry, and active/sleeping diagnostics.
-- Derived 2D SmoothLife-style ecology projections for candidate proposal and 2D visualization, blending fitness support, novelty, uncertainty, crowding, and improvement support.
-- High-dimensional evolutionary proposal sources with adaptive source credit allocation, live-population SHADE-style archive differences, low-rank CMA-style region sampling, coherent coordinate probes, surrogate-ranked proposal pools, and restart/scout proposals.
-- Dimension-aware quadratic/diagonal surrogate candidates, derivative-free pattern probes, and hybrid BFGS/Levenberg-Marquardt local refinement.
+- Derived 2D SmoothLife-style ecology projection ensembles for candidate proposal and 2D visualization, blending fitness support, novelty, uncertainty, crowding, and improvement support.
+- A deterministic stage allocator for exploration, basin polishing, and large-D propagation.
+- Dimension-aware quadratic/diagonal surrogate candidates, reliability-gated surrogate preselection, derivative-free pattern probes, bracketed direction-set line search, cooperative frontier refinement, and hybrid BFGS/Levenberg-Marquardt local refinement.
 - GIF animation export for 2D simulation and 2D point-cloud search trajectories.
 - Built-in benchmark objectives and repeated seeded benchmark runs.
 - CLI/config/objective ingestion for JSON/TOML config files, Python-callable objectives, and CSV sampled-surface objectives.
@@ -56,7 +56,7 @@ N-D point-cloud optimization run:
 smooth-life-search point-cloud --objective rosenbrock --dimension 5 --seed 7 --budget 20000 --target-value 1e-6
 ```
 
-High-dimensional evolutionary point-cloud run:
+High-dimensional point-cloud run:
 
 ```bash
 smooth-life-search point-cloud --objective rosenbrock --dimension 30 --seed 7 --budget 6400
@@ -88,20 +88,21 @@ Point-cloud trust regions are enabled by default. Disable region candidate batch
 
 Anisotropic proposal regions are enabled by default. Disable rotated archive-derived region geometry with `--no-anisotropic-regions`, or tune it with `--region-anisotropy-max` and `--region-geometry-min-samples`.
 
-For N-D runs, tune the local active subspace with `--active-subspace-size`, the surrogate model cutoff with `--surrogate-full-quadratic-max-dimension`, and the 2D proposal-density projection with `--projection-axes I J`.
+For N-D runs, tune the local active subspace with `--active-subspace-size`, the surrogate model cutoff with `--surrogate-full-quadratic-max-dimension`, and the 2D proposal-density projection with `--projection-axes I J`. Projection ensembles are enabled by default; tune them with `--projection-ensemble-size` and `--projection-ensemble-refresh-batches`, or disable them with `--no-projection-ensemble`.
 
-For high-dimensional runs, evolutionary proposal sources turn on at `--high-dimensional-min-dimension` by default. Restart scouts use scrambled low-discrepancy points with per-axis variation, so they explore broadly without injecting constant diagonal benchmark optima. Tune adaptive allocation with `--source-credit-temperature`, `--source-exploration-floor`, `--relative-success-credit`, `--evolutionary-population-size`, and `--evolutionary-population-max`; tune surrogate preselection with `--candidate-pool-multiplier` and `--surrogate-ranking-neighbor-count`; disable individual engines with `--no-source-adaptation`, `--no-coherent-probes`, `--no-shade`, `--no-cma-region`, `--no-restart-strategy`, or `--no-surrogate-ranking`.
+For high-dimensional runs, the optimizer uses a deterministic stage allocator. Exploration mixes global, SmoothLife-density, region, and coherent proposals. Basin polishing shifts toward regions, coherent probes, exploit/pattern candidates, surrogate-ranked pools, and direction/local refinement. Large-D propagation reserves budget for coherent probes and cooperative active-set groups. Tune surrogate preselection with `--candidate-pool-multiplier`, `--surrogate-ranking-neighbor-count`, `--surrogate-rank-weight-min`, and `--surrogate-rank-weight-max`; disable reliability gating with `--no-surrogate-reliability`. Tune the candidate/refinement cadence with `--dimension-scaled-batch-max`; disable relevant lean systems with `--no-coherent-probes`, `--no-surrogate-ranking`, `--no-direction-refinement`, or `--no-cooperative-refinement`.
 
 High-dimensional local polishing is also enabled by default. Once the archive
 has moved materially beyond deterministic anchors, basin-polishing allocation
-spends more evaluations on exploit, region, CMA, SHADE, and direction-set
-refinement. Finite-difference probes can recenter on meaningful incumbent
+spends more evaluations on exploit, region, coherent, surrogate-ranked, and
+bracketed direction-set refinement. Finite-difference probes can recenter on meaningful incumbent
 improvements, successful steps feed derivative-free line searches, linkage
 scores form coupled refinement blocks, and cross-block L-BFGS memory reuses
 accepted curvature. Tune these with `--basin-polishing-activation-ratio`,
 `--successful-direction-memory-size`, `--direction-refinement-max-evaluations`,
-`--linkage-neighbor-count`, and `--cross-block-lbfgs-memory-size`; disable them
-with `--no-probe-recenter`, `--no-basin-polishing`,
+`--direction-line-search-mode`, `--direction-line-search-max-steps`,
+`--direction-line-search-min-step-fraction`, `--linkage-neighbor-count`, and
+`--cross-block-lbfgs-memory-size`; disable them with `--no-probe-recenter`, `--no-basin-polishing`,
 `--no-direction-refinement`, `--no-linkage-blocks`, or
 `--no-cross-block-lbfgs`.
 
@@ -111,9 +112,11 @@ steps, linkage, elite spread, and coverage pressure, then refines small
 coordinate groups in the incumbent context while coherent high-D probes test
 archive-derived coordinate levels with per-axis jitter. Tune this layer with
 `--cooperative-group-size`, `--cooperative-groups-per-batch`,
+`--cooperative-frontier-fraction`, `--axis-coverage-pressure`,
 `--active-set-max-fraction`, and
 `--active-set-expand-interval-batches`; disable it with
-`--no-cooperative-refinement`.
+`--no-cooperative-refinement` or disable only the frontier bias with
+`--no-cooperative-frontier`.
 
 Current no-GIF Rosenbrock smoke checks use:
 
@@ -122,8 +125,9 @@ smooth-life-search point-cloud --objective rosenbrock --dimension 100 --seed 7 -
 smooth-life-search point-cloud --objective rosenbrock --dimension 500 --seed 7 --budget 6400
 ```
 
-The current checkpoint lands below `1.0` on 100D and around `1.9e1` on 500D
-for those commands, while still exhausting the requested budget by default.
+The current lean checkpoint lands around `5.55e-2` on 100D and `2.18e1` on
+500D for those commands, while still exhausting the requested budget by
+default.
 
 Use the ablation runner to measure source contributions without rendering GIFs:
 

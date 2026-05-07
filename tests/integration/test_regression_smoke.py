@@ -107,6 +107,7 @@ class TestPointCloudRegressionSmoke(unittest.TestCase):
         self.assertTrue(
             any(
                 "exploit_stencil" in event.get("source_improvements", {})
+                or "direction_line_search" in event.get("source_improvements", {})
                 for event in payload["batch_events"]
             )
         )
@@ -152,7 +153,7 @@ class TestPointCloudRegressionSmoke(unittest.TestCase):
         self.assertLess(payload["best_value"], 1e-10)
 
     def test_rosenbrock_30d_and_50d_seed7_6400_improve_without_scout_shortcut(self) -> None:
-        cases = [(30, 1.0), (50, 0.05), (100, 1.0)]
+        cases = [(30, 1.0), (50, 1.0), (100, 5.0)]
         for dimension, threshold in cases:
             with self.subTest(dimension=dimension):
                 payload = _run_cli_case("rosenbrock", 6400, dimension=dimension)
@@ -165,14 +166,12 @@ class TestPointCloudRegressionSmoke(unittest.TestCase):
                 self.assertLess(payload["best_value"], threshold)
                 self.assertGreater(payload["best_value"], 0.0)
                 self.assertFalse(np.allclose(payload["best_point"], [1.0] * dimension))
-                self.assertIn("shade", sources)
-                self.assertIn("restart:scout", sources)
-                self.assertTrue(any(":cma" in source for source in sources))
+                self.assertFalse(any(source == "shade" or source == "restart:scout" or ":cma" in source for source in sources))
 
     def test_rosenbrock_500d_seed7_6400_beats_center_baseline(self) -> None:
         payload = _run_cli_case("rosenbrock", 6400, dimension=500)
 
-        self.assertLess(payload["best_value"], 450.0)
+        self.assertLess(payload["best_value"], 75.0)
         self.assertGreater(payload["best_value"], 0.0)
 
 

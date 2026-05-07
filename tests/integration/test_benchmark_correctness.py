@@ -61,7 +61,7 @@ def _run_case(objective, *, dimension: int, seed: int, budget: int = 1600):
 
 
 class TestBenchmarkCorrectness(unittest.TestCase):
-    def test_adversarial_transforms_improve_without_anchor_or_restart_provenance(self) -> None:
+    def test_adversarial_transforms_improve_without_anchor_or_removed_source_provenance(self) -> None:
         dimension = 12
         target = np.linspace(-2.7, 3.1, dimension)
         rotation = _orthogonal_matrix(dimension)
@@ -87,7 +87,7 @@ class TestBenchmarkCorrectness(unittest.TestCase):
                 0.25,
             ),
         ]
-        forbidden_exact_sources = {"center", "anchor", "restart:scout"}
+        forbidden_exact_sources = {"center", "anchor", "restart:scout", "shade"}
 
         for name, objective, improvement_ratio in cases:
             with self.subTest(name=name):
@@ -103,35 +103,25 @@ class TestBenchmarkCorrectness(unittest.TestCase):
 
                 self.assertLess(float(np.median(values)), baseline * improvement_ratio)
 
-    def test_restart_ablation_no_longer_solves_rosenbrock_by_diagonal_scout(self) -> None:
+    def test_removed_evolutionary_sources_are_absent_on_high_d_rosenbrock(self) -> None:
         dimension = 30
         center_baseline = rosenbrock(np.zeros(dimension, dtype=float))
-        for restart_enabled in (True, False):
-            with self.subTest(restart_enabled=restart_enabled):
-                search = PointCloudSmoothLifeSearch(
-                    rosenbrock,
-                    [(-10.0, 10.0)] * dimension,
-                    SmoothLifeConfig(store_all_snapshots=False),
-                    PointCloudSearchConfig(
-                        max_evaluations=1200,
-                        batch_size=32,
-                        restart_strategy_enabled=restart_enabled,
-                    ),
-                )
-                search.reset(seed=7)
-                run = search.run()
-                best_sample = min(search.archive.samples, key=lambda sample: sample.value)
-                restart_points = [
-                    sample.point
-                    for sample in search.archive.samples
-                    if sample.source == "restart:scout"
-                ]
+        search = PointCloudSmoothLifeSearch(
+            rosenbrock,
+            [(-10.0, 10.0)] * dimension,
+            SmoothLifeConfig(store_all_snapshots=False),
+            PointCloudSearchConfig(max_evaluations=1200, batch_size=32),
+        )
+        search.reset(seed=7)
+        run = search.run()
+        best_sample = min(search.archive.samples, key=lambda sample: sample.value)
+        sources = {sample.source for sample in search.archive.samples}
 
-                self.assertLess(run.best_value, center_baseline)
-                self.assertGreater(run.best_value, 0.0)
-                self.assertFalse(np.allclose(run.best_point, np.ones(dimension)))
-                self.assertFalse(best_sample.source == "restart:scout" and abs(best_sample.value) <= 1e-14)
-                self.assertFalse(any(np.allclose(point, np.ones(dimension)) for point in restart_points))
+        self.assertLess(run.best_value, center_baseline)
+        self.assertGreater(run.best_value, 0.0)
+        self.assertFalse(np.allclose(run.best_point, np.ones(dimension)))
+        self.assertFalse(best_sample.source == "restart:scout" and abs(best_sample.value) <= 1e-14)
+        self.assertFalse(any(source == "restart:scout" or source == "shade" or ":cma" in source for source in sources))
 
 
 if __name__ == "__main__":
